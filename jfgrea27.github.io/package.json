@@ -1,0 +1,28 @@
+{
+  "name": "me",
+  "private": true,
+  "version": "1.0.0",
+  "description": "My personal website",
+  "main": "index.js",
+  "devDependencies": {
+    "js-beautify": "^1.15.4"
+  },
+  "scripts": {
+    "test": "npm run beautify",
+    "beautify": "js-beautify layouts/**/*.html -r"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jfgrea27/me.git"
+  },
+  "author": {
+    "name": "James Rea",
+    "email": "jfgrea27@gmail.com",
+    "url": "https://www.jfgrea27.xyz"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jfgrea27/me/issues"
+  },
+  "homepage": "https://github.com/jfgrea27/me#readme"
+}
