@@ -22,7 +22,7 @@ jobs:
           hugo-version: 'latest'
 
       - name: Build
-        run: (cd jfgrea27.github.io && hugo --minify --source ./site --theme ../..)
+        run: (cd jfgrea27.github.io && hugo --minify)
 
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3
