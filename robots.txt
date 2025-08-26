@@ -1,2 +1,2 @@
 User-Agent: *
-Sitemap: https://jfgrea27.xyz/sitemap.xml
+Sitemap: https://jfgrea27.github.io/sitemap.xml
