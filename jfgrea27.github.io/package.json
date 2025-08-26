@@ -1,5 +1,5 @@
 {
-  "name": "me",
+  "name": "jfgrea27.github.io",
   "private": true,
   "version": "1.0.0",
   "description": "My personal website",
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jfgrea27/me.git"
+    "url": "git+https://github.com/jfgrea27/jfgrea27.github.io.git"
   },
   "author": {
     "name": "James Rea",
@@ -22,7 +22,7 @@
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/jfgrea27/me/issues"
+    "url": "https://github.com/jfgrea27/jfgrea27.github.io/issues"
   },
-  "homepage": "https://github.com/jfgrea27/me#readme"
+  "homepage": "https://github.com/jfgrea27/jfgrea27.github.io#readme"
 }
