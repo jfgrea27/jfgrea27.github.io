@@ -1,1 +1,19 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Rust, Consensus, an exploration through Key-Value store. on James Rea Blog</title><link>https://jfgrea27.github.io/posts/02-rust-raft-impl/</link><description>Recent content in Rust, Consensus, an exploration through Key-Value store. on James Rea Blog</description><generator>Hugo</generator><language>en-uk</language><lastBuildDate>Tue, 26 Aug 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://jfgrea27.github.io/posts/02-rust-raft-impl/index.xml" rel="self" type="application/rss+xml"/><item><title>01 - A very simple distributed Key-Value store</title><link>https://jfgrea27.github.io/posts/02-rust-raft-impl/01-types-of-tees/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/posts/02-rust-raft-impl/01-types-of-tees/</guid><description>Setting the scene with a very simple Key-Value store</description></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Rust, Consensus, an exploration through Key-Value store. on James Rea Blog</title>
+    <link>http://localhost:1313/posts/02-rust-raft-impl/</link>
+    <description>Recent content in Rust, Consensus, an exploration through Key-Value store. on James Rea Blog</description>
+    <generator>Hugo</generator>
+    <language>en-uk</language>
+    <lastBuildDate>Tue, 26 Aug 2025 00:00:00 +0000</lastBuildDate>
+    <atom:link href="http://localhost:1313/posts/02-rust-raft-impl/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>01 - A very simple distributed Key-Value store</title>
+      <link>http://localhost:1313/posts/02-rust-raft-impl/01-types-of-tees/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/posts/02-rust-raft-impl/01-types-of-tees/</guid>
+      <description>Setting the scene with a very simple Key-Value store</description>
+    </item>
+  </channel>
+</rss>

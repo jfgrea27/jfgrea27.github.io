@@ -1,1 +1,54 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Tags on James Rea Blog</title><link>https://jfgrea27.github.io/tags/</link><description>Recent content in Tags on James Rea Blog</description><generator>Hugo</generator><language>en-uk</language><lastBuildDate>Tue, 26 Aug 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://jfgrea27.github.io/tags/index.xml" rel="self" type="application/rss+xml"/><item><title>Ai</title><link>https://jfgrea27.github.io/tags/ai/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/tags/ai/</guid><description/></item><item><title>Consensus</title><link>https://jfgrea27.github.io/tags/consensus/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/tags/consensus/</guid><description/></item><item><title>Distributed Systems</title><link>https://jfgrea27.github.io/tags/distributed-systems/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/tags/distributed-systems/</guid><description/></item><item><title>K8s</title><link>https://jfgrea27.github.io/tags/k8s/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/tags/k8s/</guid><description/></item><item><title>Privacy</title><link>https://jfgrea27.github.io/tags/privacy/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/tags/privacy/</guid><description/></item><item><title>Tee</title><link>https://jfgrea27.github.io/tags/tee/</link><pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate><guid>https://jfgrea27.github.io/tags/tee/</guid><description/></item></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Tags on James Rea Blog</title>
+    <link>http://localhost:1313/tags/</link>
+    <description>Recent content in Tags on James Rea Blog</description>
+    <generator>Hugo</generator>
+    <language>en-uk</language>
+    <lastBuildDate>Tue, 26 Aug 2025 00:00:00 +0000</lastBuildDate>
+    <atom:link href="http://localhost:1313/tags/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>Ai</title>
+      <link>http://localhost:1313/tags/ai/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/tags/ai/</guid>
+      <description></description>
+    </item>
+    <item>
+      <title>Consensus</title>
+      <link>http://localhost:1313/tags/consensus/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/tags/consensus/</guid>
+      <description></description>
+    </item>
+    <item>
+      <title>Distributed Systems</title>
+      <link>http://localhost:1313/tags/distributed-systems/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/tags/distributed-systems/</guid>
+      <description></description>
+    </item>
+    <item>
+      <title>K8s</title>
+      <link>http://localhost:1313/tags/k8s/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/tags/k8s/</guid>
+      <description></description>
+    </item>
+    <item>
+      <title>Privacy</title>
+      <link>http://localhost:1313/tags/privacy/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/tags/privacy/</guid>
+      <description></description>
+    </item>
+    <item>
+      <title>Tee</title>
+      <link>http://localhost:1313/tags/tee/</link>
+      <pubDate>Tue, 26 Aug 2025 00:00:00 +0000</pubDate>
+      <guid>http://localhost:1313/tags/tee/</guid>
+      <description></description>
+    </item>
+  </channel>
+</rss>
