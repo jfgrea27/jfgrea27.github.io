@@ -127,7 +127,7 @@ In Type-2 hypervisor, there is a Host OS that runs the hypervisor amongst other 
 
 Most cloud providers predominantly deploy applications in VMs running [Type-1 hypervisor](https://en.wikipedia.org/wiki/Hypervisor), as illustrated below
 
-![alt text](/posts/01-genai-and-tee/01-types-of-tees/hypervisor-types.svg "Types of hypervisor - (Wikipedia)")
+![alt text](./hypervisor-types.svg "Types of hypervisor - (Wikipedia)")
 
 As a contrast, if you were to run a VM on your laptop, this would be a Type-2 hypervisor as your laptop OS is running the hypervisor (and guest OS) as well as other applications (like browser, etc.).
 
