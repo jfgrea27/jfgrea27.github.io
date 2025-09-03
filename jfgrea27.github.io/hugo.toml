@@ -31,6 +31,8 @@ paginationSize = 100
 listSummaries = true
 listDateFormat = '2 Jan 2006'
 
+faviconPath = './favicon'
+
 # Breadcrumbs
 [params.breadcrumbs]
 enabled = true
