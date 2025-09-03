@@ -30,13 +30,8 @@
           packages = [
             pkgs.just
             pkgs.git
-
             # site builder
             pkgs.hugo
-
-            # infra
-            pkgs.terraform
-            pkgs.azure-cli
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${gccLib}/lib:${pkgs.zlib}/lib

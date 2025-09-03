@@ -2,8 +2,7 @@
 baseURL = 'https://jfgrea27.github.io/'
 languageCode = 'en-uk'
 title = 'James Rea Blog'
-# Google analytics code
-googleAnalytics = "G-xxxxxxxxx"
+
 
 [taxonomies]
 tag = 'tags'
@@ -13,8 +12,8 @@ tag = 'tags'
 description = "A Tech Blog"
 
 # Appearance settings
-theme = 'auto'
-colorPalette = 'default'
+theme = 'light'
+colorPalette = 'gruvebox'
 hideHeader = false
 
 # Intro on main page, content is markdown

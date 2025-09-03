@@ -1,3 +1,3 @@
+serve:
+    (cd jfgrea27.github.io && hugo server)
 
-build:
-    (cd jfgrea27.github.io && hugo build --source ./site --theme ../..)
