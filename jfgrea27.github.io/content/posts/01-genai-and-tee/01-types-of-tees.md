@@ -32,11 +32,11 @@ For each TEE solution, we will discuss
 
 **Architecture**
 
-The SGX architecture relies on creating a reserved region of memory, the **Enclave Page Cache** that holds encrypted data that is protected by a hardware-derived key (the **Root Sealing Key (RSK)**) that only resides in a secure CPU register.
-SGX also adds a set of instructions (including `ECREATE`, `EENTER`, `EEXIT`) to manage the enclave.
-The **Memory Encryption Engine (MEE)** built into the memory controller is responsible for the encryption/decryption of the data.
+The SGX architecture relies on creating a reserved region of memory, the **Enclave Page Cache** that holds encrypted data that is protected by a hardware-derived key (the **Root Sealing Key (RSK)**). This key only resides in a secure CPU register.
+SGX also adds a set of CPU instructions (including `ECREATE`, `EENTER`, `EEXIT`) to manage the enclave.
+The **Memory Encryption Engine (MEE)** built into the memory controller is responsible for the encryption/decryption of the data as it leaves/enters the cpu.
 
-No one, not even the root has access to the EPC in DRAM. Further, data is only decrypted inside the CPU, so L1/L2/L3 caches still hold encrypted data. The MEE encrypts/decrypts data on-the-fly, which has some performance overhead.
+No one, not even `root` user has access to the EPC in DRAM. Further, data is only decrypted inside the CPU, so L1/L2/L3 caches still hold encrypted data. The MEE encrypts/decrypts data on-the-fly, which has some performance overhead.
 
 The control flow works as follows:
 
@@ -46,8 +46,6 @@ The control flow works as follows:
 4. Enter the enclave using `EENTER`;
 5. Run _trusted function_;
 6. Exit the enclave using `EEXIT`.
-
-[Remote Attestation](#remove-attestation) in SGX is done as follows:
 
 **Example - a minimal SGX enclave**
 
@@ -83,6 +81,8 @@ It is worth noting that SGX are not fully immune.
 TODO TALK ABOUT THE TYPES OF ATTACKS vulenrable to side-channel attacks - cache timing, page fault patterns.
 
 A typical use case for using SGX Intel as TEE would be smallish applications that require small trust - for instance a cryptographic key/password store.
+
+[Remote Attestation](#remove-attestation) in SGX is done as follows:
 
 ### AMD SEV-SNP
 
@@ -133,7 +133,7 @@ As a contrast, if you were to run a VM on your laptop, this would be a Type-2 hy
 
 ### Trusted Computing Base
 
-The **Trusted Computing Base (TCB)** is the set of hardware, firmware and software components that must be trusted to enforce the security properties of a system. If any part of the TCB is _compromised_, the security guarantees of the system (e.g. TEE) can be broken.
+The **Trusted Computing Base (TCB)** is the _minimum_ set of hardware, firmware and software components that must be trusted to enforce the security properties of a system. If any part of the TCB is _compromised_, the security guarantees of the system (e.g. TEE) can be broken.
 
 The smaller the TCB, the less must be trusted to be secure, hence better security.
 
