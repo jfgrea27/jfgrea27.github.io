@@ -24,7 +24,6 @@ For the sake of scope reduction, I will only explore Intel's SGX, AMD's SEV-SNP 
 For each TEE solution, we will discuss
 
 - its Architecture;
-- its Remote Attestation framework;
 - an example of a working TEE;
 - its use-cases.
 
@@ -32,11 +31,12 @@ For each TEE solution, we will discuss
 
 **Architecture**
 
-The SGX architecture relies on creating a reserved region of memory, the **Enclave Page Cache** that holds encrypted data that is protected by a hardware-derived key (the **Root Sealing Key (RSK)**). This key only resides in a secure CPU register.
-SGX also adds a set of CPU instructions (including `ECREATE`, `EENTER`, `EEXIT`) to manage the enclave.
-The **Memory Encryption Engine (MEE)** built into the memory controller is responsible for the encryption/decryption of the data as it leaves/enters the cpu.
+The SGX architecture relies on creating a reserved region of memory, the **Enclave Page Cache** that holds encrypted data. This part of the memory is encrypted by special hardware that lives inside the CPU.
+During boot, the CPU will generate a hardware-derived key, the **Root Sealing Key (RSK)**, which is used by **Memory Encryption Engine (MEE)** (also living inside the CPU) to encrypt/decrypt any data leaving/entering the CPU.
 
-No one, not even `root` user has access to the EPC in DRAM. Further, data is only decrypted inside the CPU, so L1/L2/L3 caches still hold encrypted data. The MEE encrypts/decrypts data on-the-fly, which has some performance overhead.
+Intel's SGX also includes special instruction sets including `ECREATE`, `EENTER`, etc., which help separate the User Runtime System (urts) from the Trusted Runtime System (trst).
+
+No one, not even `root` user has access to the EPC in DRAM. Further, data is only decrypted inside the CPU, so L1/L2/L3 caches still hold encrypted data. The encryption process does have some performance overheads.
 
 The control flow works as follows:
 
@@ -47,15 +47,15 @@ The control flow works as follows:
 5. Run _trusted function_;
 6. Exit the enclave using `EEXIT`.
 
+The `ECALL`/`OCALL` instructions allow calling urts/trst code from trst/urts respectively.
+
 **Example - a minimal SGX enclave**
 
-This example is a basic application running an enclave using the [sgx-linux](https://github.com/intel/linux-sgx) repository.
+This [minimal-sgx-enclave](https://github.com/jfgrea27/minimal-sgx-enclave) uses the [sgx-linux](https://github.com/intel/linux-sgx) project.
 
 We will assume you have installed `Intel SGX SDK` and `Intel SGX PSW`.
 
 > **_NOTE:_** I had some difficulties installing SGX Linux on my Ubuntu 24.04 box. [This article](https://codentium.com/setting-up-intel-sgx/) was very useful
-
-I have created a [minimal-sgx-enclave](https://github.com/jfgrea27/minimal-sgx-enclave) for exploring SGX internals.
 
 ```sh
 git clone git@github.com:jfgrea27/minimal-sgx-enclave.git
@@ -70,36 +70,30 @@ You have ran your first enclave!
 The repository explores SGX more in depth including:
 
 - [SGX Ergonomics](https://github.com/jfgrea27/minimal-sgx-enclave/blob/main/README.md#sgx-ergonomics)
-- [Assembly calls](https://github.com/jfgrea27/minimal-sgx-enclave/blob/main/README.md#assembly-calls)
-- [Remote Attestation](https://github.com/jfgrea27/minimal-sgx-enclave/blob/main/README.md#sgx-ergonomics)
 
 **Discussion**
 
 As we have detailed in SGX's architecture above, the system relies on a very small TCB that includes the CPU and its microcode. Data is always stored in EPC (encrypted), which limits SGX use-cases to small applications, although Azure do provide some of their DCdsv3 series with up to 256GiB of EPC, as noted [here](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dcdsv3-series?tabs=sizebasic#sizes-in-series).
 
-It is worth noting that SGX are not fully immune.
-TODO TALK ABOUT THE TYPES OF ATTACKS vulenrable to side-channel attacks - cache timing, page fault patterns.
+It is worth noting that SGX are not fully immune. Since data is not encrypted in L1/L2/L3 caches, it is susceptible to side-channel attacks, including speculative execution attacks (e.g. [Meltdown & Spectre](https://meltdownattack.com/)).
 
 A typical use case for using SGX Intel as TEE would be smallish applications that require small trust - for instance a cryptographic key/password store.
 
-[Remote Attestation](#remove-attestation) in SGX is done as follows:
+There has been notable work around distributed SGX architecture (e.g [here](https://arxiv.org/pdf/2207.05079)), which look interesting. However, the limitations of running SGX only on CPU and not GPU make AI workloads for instance limited.
 
 ### AMD SEV-SNP
 
 **Architecture**
+As we have seen in [Intel SGX](#intel-sgx), the memory limitations of the EPC make deploying large scale TEE applications in the SGX architecture pretty tricky.
 
-<!--
-- Guest VM full memory is encrypted
+AMD came up with a compromise: rather than have an enclave at the process level, why not make one at the **VM** level.
 
-- Limitations
+The advantages of forgoing this security are significant:
 
-  - Attacks inside Guest OS still possible
+- Minimal changes to your applications are required to run it in an AMD SEV-SNP enclave; a lift-and-shit option if you want to deploy quickly.
+- More flexible sizes/general availability than Intel SGX.
 
-- when to use
-
-  - cloud deployments where customers don't trust the cloud provider
-
-- Atestation -> what it measures -->
+Clearly, an increase in the TCB will increase the attack surface. Any vulnerability in devices (e.g. compromised NICs) could be a threat due to the reduced isolation of the enclave.
 
 **Example - Deploying a TEE on a Cloud provider**
 
