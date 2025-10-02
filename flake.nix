@@ -29,6 +29,7 @@
         devShell = pkgs.mkShell {
           packages = [
             pkgs.just
+            pkgs.go
             pkgs.git
             # site builder
             pkgs.hugo
