@@ -15,7 +15,7 @@ Trusted Execution Environments (TEE) are secure hardware that:
 
 - Run code isolation from the rest of the system;
 - Protect memory and computation from the OS, hypervisor;
-- Guarantee the code running inside hasn't been tampered through an **attestation** framework that takes measurements of the hardware and software running in the TEE and validates these to ensure the TEE has not yet been tampered.
+- Guarantee the code running inside hasn't been tampered through a process called [Remote Attestation](01-types-of-tees#remote-attestation) that proves the genuiness of the TEE by taking measurements of the hardware and software running in the TEE and validating these to ensure the TEE has not yet been tampered with.
 
 As GenAI is becoming more widely used, I am interested in seeing where we could leverage TEEs to deploy GenAI applications in domains and environments that would on the one hand greatly benefit from such technology (e.g. medical/financial sectors), but are currently too confidential to use chatbot providers such as ChatGPT.
 
