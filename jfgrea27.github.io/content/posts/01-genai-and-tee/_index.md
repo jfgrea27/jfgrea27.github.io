@@ -31,4 +31,4 @@ It is advised that the security engineer should carry out the necessary [Thread 
 
 This series on TEEs is only part of what is required to built such secure systems.
 
-More specifically, this series will explore the following:
+More specifically, this series will explore the following (reverse order):

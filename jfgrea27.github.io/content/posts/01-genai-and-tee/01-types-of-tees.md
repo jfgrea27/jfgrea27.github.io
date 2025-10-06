@@ -6,6 +6,7 @@ summary: "A whistle stop tour of the types of TEEs."
 tags: ["tee", "privacy"]
 draft: false
 hideHeader: true
+weight: 9
 ---
 
 Trusted Execution Environments are special pieces of hardware that encrypt data in-use so to prevent attackers from compromising running applications.
@@ -69,7 +70,7 @@ You have ran your first enclave!
 
 Looking at the code, we see that we must define `Enclave.edl`
 
-```
+```edl  
 enclave {
     trusted {
         public int enclave_add(int a, int b);
@@ -175,13 +176,12 @@ Notes:
 - `security_encryption_type=DiskWithVMGuestState` is required for SEV-SNP.
 
 
-We can retrieve the 
 **Remote Attestation in AMD SEV-SNP enclave**
 
 At a high level, RA for AMD SEV-SNP works as follows:
 
 1. The VM guest communicates with the **AMD Secure Processor** a dedicated co-processor on the CPU, requesting attestation via the *Guest Owner Key (GOK)* interface.
-2. The *PSP (Platform Security Processor) measures the VM (firmware, memory, etc.) and generates a measurement report .
+2. The *PSP (Platform Security Processor)* measures the VM (firmware, memory, etc.) and generates a measurement report .
 3. The PSP signs it using an AM root key. 
 4. The host gets the AMD-signed certificate chain. 
 
@@ -191,6 +191,7 @@ Notes:
 
 
 **Discussion**
+
 It is clear from the above demonstration that little effort is required to migrate an application to run on AMD SEV-SNP. 
 However, as already mentioned, the TCB for AMD SEV-SNP is significantly larger than for SGX. This means that the attack surface is greater, 
 including shared libraries, guest OS etc. 

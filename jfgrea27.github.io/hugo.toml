@@ -64,7 +64,7 @@ url = "/about"
 # Syntax highlight on code blocks
 [markup]
 [markup.highlight]
-style = 'algol'
+style = 'arduino'
 
 # Giscus comments
 [params.giscus]
