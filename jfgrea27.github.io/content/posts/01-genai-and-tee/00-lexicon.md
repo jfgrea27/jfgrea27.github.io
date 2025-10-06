@@ -1,5 +1,5 @@
 ---
-title: "00 - TEE Lexicon"
+title: "TEE: 00 - TEE Lexicon"
 author: "James"
 date: "2025-10-05"
 summary: "Lexicon for TEE"

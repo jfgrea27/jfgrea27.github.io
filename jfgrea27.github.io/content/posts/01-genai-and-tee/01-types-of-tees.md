@@ -1,5 +1,5 @@
 ---
-title: "01 - Types of TEEs"
+title: "TEE: 01 - Types of TEEs"
 author: "James"
 date: "2025-10-06"
 summary: "A whistle stop tour of the types of TEEs."
