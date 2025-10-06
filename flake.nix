@@ -27,12 +27,13 @@
       in
       {
         devShell = pkgs.mkShell {
-          packages = [
-            pkgs.just
-            pkgs.go
-            pkgs.git
+          packages = with pkgs; [
+            just
+            go
+            git
+            stdenv.cc.cc.lib
             # site builder
-            pkgs.hugo
+            hugo
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${gccLib}/lib:${pkgs.zlib}/lib

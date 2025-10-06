@@ -19,7 +19,7 @@ hideHeader = false
 # Intro on main page, content is markdown
 homeIntroTitle = 'Hi!'
 homeIntroContent = """
-Hello! I'm James, a software engineer exploring **AI**, **distributed systems**, and all things code, and this is where I will write my findings!
+Hello! I'm James, a software engineer exploring **AI**, **data**, **distributed systems**, and all things code, and this is where I will write my findings!
 """
 
 # Collection to display on home
