@@ -3,6 +3,8 @@ title: "Journey"
 date: 2025-11-29
 draft: false
 hideBackToTop: true
+hideHeader: true
+hidePagination: true
 ---
 
 Decisions and milestones from my career journey.

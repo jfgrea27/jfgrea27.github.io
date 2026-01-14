@@ -3,6 +3,8 @@ title: "Today I Learnt"
 date: 2025-11-29
 draft: false
 hideBackToTop: true
+hideHeader: true
+hidePagination: true
 ---
 
 A running log of things I learn day today, whatever day. 

@@ -1,0 +1,45 @@
+{{ define "main" }}
+
+{{ .Content }}
+
+{{/* Intro summary section */}}
+
+{{ if or .Site.Params.homeIntroTitle .Site.Params.homeIntroContent }}
+<div class="intro">
+    {{ with .Site.Params.homeIntroTitle }}
+    <h1>{{ . }}</h1>
+    {{ end }}
+
+    {{ with .Site.Params.homeIntroContent }}
+    <p>{{ . | markdownify }}</p>
+    {{ end }}
+</div>
+{{ end }}
+
+{{/* Collection Section */}}
+
+{{ if .Site.Params.homeCollection }}
+
+<div class="list-container">
+    {{ with .Site.Params.homeCollectionTitle}}
+    <h1> {{ . }} </h1>
+    {{ end }}
+
+    {{/* Get section pages (posts with _index.md) sorted by date descending */}}
+    {{ $section := .Site.GetPage .Site.Params.homeCollection }}
+    {{ $pages := $section.Sections.ByDate.Reverse }}
+
+    {{ $paginationSize := 5 }}
+
+    {{ $paginator := .Paginate $pages $paginationSize }}
+
+    {{ range $index, $page := $paginator.Pages }}
+    {{ partial "post-entry.html" $page}}
+    {{ end }}
+
+    {{ partial "pagination-controls.html" $paginator}}
+
+    {{ end }}
+</div>
+
+{{ end }}

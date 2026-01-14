@@ -3,6 +3,8 @@ title: "A bit about me!"
 date: 2025-08-26
 draft: false
 hideBackToTop: true
+hideHeader: true
+hidePagination: true
 ---
 
 I am a half Belgian/English Senior Software Engineer, working in a London-based voice-GenAI scale up.

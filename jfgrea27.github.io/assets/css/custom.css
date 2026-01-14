@@ -1,5 +1,5 @@
 :root {
-  --main-width: 1200px;
+  --main-width: 1400px;
 }
 
 .table-outer {
@@ -11,4 +11,19 @@ table {
   width: auto !important;
   margin-left: auto !important;
   margin-right: auto !important;
+}
+
+/* Consistent footer positioning */
+body {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+body > .content {
+  flex: 1;
+}
+
+footer {
+  margin-top: auto;
 }

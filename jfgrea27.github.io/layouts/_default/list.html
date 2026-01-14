@@ -1,0 +1,30 @@
+{{ define "main" }}
+
+<div class="list-container">
+
+    {{ partial "breadcrumbs.html" . }}
+
+    <h1>{{ .Title }}</h1>
+    {{ .Content }}
+
+    {{ $tagsPage := eq .Title "Tags"}}
+
+    {{ $paginationSize := 10 }}
+
+    {{ $paginator := .Paginate (.Pages.ByDate.Reverse) $paginationSize }}
+
+    {{ range $index, $page := $paginator.Pages }}
+
+    {{ if $tagsPage }}
+    {{ partial "tag-entry.html" $page}}
+    {{ else }}
+    {{ partial "post-entry.html" $page}}
+    {{ end }}
+
+    {{ end }}
+
+    {{ partial "pagination-controls.html" $paginator}}
+
+</div>
+
+{{ end }}
