@@ -1,0 +1,274 @@
+<!doctype html><html lang=en-uk dir=ltr><head><meta charset=utf-8><meta name=viewport content="width=device-width"><link rel=icon type=image/ico href=https://jfgrea27.github.io/favicon/favicon.ico><link rel=icon type=image/png sizes=16x16 href=https://jfgrea27.github.io/favicon/favicon-16x16.png><link rel=icon type=image/png sizes=32x32 href=https://jfgrea27.github.io/favicon/favicon-32x32.png><link rel=icon type=image/png sizes=192x192 href=https://jfgrea27.github.io/favicon/android-chrome-192x192.png><link rel=apple-touch-icon sizes=180x180 href=https://jfgrea27.github.io/favicon/apple-touch-icon.png><link rel=alternate type=application/rss+xml href=https://jfgrea27.github.io/posts/04-buy-me-coffee/index.xml title="James Rea Blog"><meta name=description content><title>So You Want To Buy Me Coffee? | James Rea Blog</title><link rel=canonical href=https://jfgrea27.github.io/posts/04-buy-me-coffee/><meta property="og:url" content="https://jfgrea27.github.io/posts/04-buy-me-coffee/"><meta property="og:site_name" content="James Rea Blog"><meta property="og:title" content="So You Want To Buy Me Coffee?"><meta property="og:description" content="The journey of a techy coffee shop owner building real-time dashboards - from cron jobs to Kafka + Flink"><meta property="og:locale" content="en_uk"><meta property="og:type" content="website"><link rel=stylesheet href=/assets/combined.min.92769f0c8addb7bcf9db875e83d0cb8f2148f28109b20f98f899ed3f7161b495.css media=all></head><body class=light><div style="position:fixed;top:20px;right:20px;z-index:1000;display:flex;align-items:center;gap:12px;background:var(--background);padding:8px 12px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)"><a href=https://www.linkedin.com/in/james-rea/ target=_blank rel="noopener noreferrer" title=LinkedIn style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 8a6 6 0 016 6v7h-4v-7a2 2 0 00-2-2 2 2 0 00-2 2v7h-4v-7a6 6 0 016-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
+</a><a href=https://github.com/jfgrea27 target=_blank rel="noopener noreferrer" title=GitHub style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37.0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44.0 0020 4.77 5.07 5.07.0 0019.91 1S18.73.65 16 2.48a13.38 13.38.0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07.0 005 4.77 5.44 5.44.0 003.5 8.55c0 5.42 3.3 6.61 6.44 7A3.37 3.37.0 009 18.13V22"/></svg>
+</a><a href=mailto:jfgrea27@gmail.com title=Email style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1.0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1.0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+</a><a href=/James_Rea___CV___December_2024___v4.pdf target=_blank title=CV style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6A2 2 0 004 4v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+</a><a href=https://www.buymeacoffee.com/jfgrea27 target=_blank><img src=https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png alt="Buy Me A Coffee" style=height:40px!important;width:145px!important></a></div><div class=content><header><div class=header></div></header><main class=main><div class=list-container><div class=breadcrumbs><a href=/>Home</a>
+<span class=breadcrumbs-separator>> </span><a href=/posts/>Posts</a>
+<span class=breadcrumbs-separator>> </span><a class=breadcrumbs-current href=/posts/04-buy-me-coffee/>So You Want To Buy Me Coffee?</a></div><h1>So You Want To Buy Me Coffee?</h1><p>Meet Joe. Joe is a software engineer who got tired of debugging production incidents at 3am and decided to pursue their true passion: making really good coffee. So they opened <strong>Café Joe</strong> - a small artisan coffee shop in a quiet neighbourhood.</p><p>But here&rsquo;s the thing about Joe - you can take the engineer out of tech, but you can&rsquo;t take the tech out of the engineer. Joe wanted a real-time dashboard showing orders as they came in. Revenue per hour. Top selling drinks. The works.</p><p>This is the story of how Joe&rsquo;s simple dashboard evolved as the business grew - and the architectural lessons learned along the way.</p><hr><h2 class=heading id=chapter-1-the-humble-beginning-v1>Chapter 1: The Humble Beginning (V1)
+<a class=anchor href=#chapter-1-the-humble-beginning-v1>#</a></h2><p>When Café Joe first opened, traffic was modest. Maybe 50-100 orders per day. Joe needed something simple - something they could build in a weekend between roasting beans and perfecting latte art.</p><h3 class=heading id=the-v1-architecture>The V1 Architecture
+<a class=anchor href=#the-v1-architecture>#</a></h3><p>The solution was beautifully simple:</p><ol><li><strong>Orders API</strong> - A FastAPI service that accepts orders and writes them directly to PostgreSQL</li><li><strong>Cron Job</strong> - A scheduled task running every 60 seconds that aggregates metrics</li><li><strong>Redis Cache</strong> - Stores the pre-computed metrics for the dashboard</li><li><strong>Dashboard</strong> - Polls Redis and displays pretty charts</li></ol><pre class=mermaid>flowchart LR
+    subgraph &#34;Customer Orders&#34;
+        A[☕ Order]
+    end
+
+    subgraph &#34;V1 Architecture&#34;
+        B[API&lt;br/&gt;FastAPI]
+        C[(PostgreSQL)]
+        D[Aggregator&lt;br/&gt;⏰ Cron Job]
+        E[(Redis&lt;br/&gt;Cache)]
+        F[📊 Dashboard]
+    end
+
+    A --&gt;|POST /order| B
+    B --&gt;|INSERT| C
+    D --&gt;|SELECT every 60s| C
+    D --&gt;|SET metrics| E
+    F --&gt;|GET metrics| E
+</pre><h3 class=heading id=the-code>The Code
+<a class=anchor href=#the-code>#</a></h3><p>The API handler was dead simple - accept an order, write to the database, return success:</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-python data-lang=python><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>async</span> <span style=font-weight:700;text-decoration:underline>def</span> <span style=color:#666;font-weight:700;font-style:italic>create_order_v1</span>(order: OrderCreate, db: Session):
+</span></span><span style=display:flex><span>    db_order = Order(**order.dict())
+</span></span><span style=display:flex><span>    db.add(db_order)
+</span></span><span style=display:flex><span>    db.commit()  <span style=color:#888;font-style:italic># Blocks until write completes</span>
+</span></span><span style=display:flex><span>    <span style=font-weight:700;text-decoration:underline>return</span> {<span style=color:#666;font-style:italic>&#34;status&#34;</span>: <span style=color:#666;font-style:italic>&#34;ok&#34;</span>, <span style=color:#666;font-style:italic>&#34;order_id&#34;</span>: db_order.id}
+</span></span></code></pre></div><p>The aggregator cron job ran every minute:</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-python data-lang=python><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>def</span> <span style=color:#666;font-weight:700;font-style:italic>aggregate_metrics</span>():
+</span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Query last hour of orders</span>
+</span></span><span style=display:flex><span>    orders = db.query(Order).filter(
+</span></span><span style=display:flex><span>        Order.timestamp &gt; datetime.now() - timedelta(hours=1)
+</span></span><span style=display:flex><span>    ).all()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Compute metrics</span>
+</span></span><span style=display:flex><span>    metrics = {
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;hourly_count&#34;</span>: <span style=font-weight:700;font-style:italic>len</span>(orders),
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;hourly_revenue&#34;</span>: <span style=font-weight:700;font-style:italic>sum</span>(o.price <span style=font-weight:700;text-decoration:underline>for</span> o <span style=font-weight:700>in</span> orders),
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;top_drinks&#34;</span>: get_top_drinks(orders)
+</span></span><span style=display:flex><span>    }
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Cache in Redis</span>
+</span></span><span style=display:flex><span>    redis.set(<span style=color:#666;font-style:italic>&#34;metrics:hourly&#34;</span>, json.dumps(metrics))
+</span></span></code></pre></div><h3 class=heading id=the-good>The Good
+<a class=anchor href=#the-good>#</a></h3><ul><li><strong>Simple to understand</strong> - Anyone could debug it</li><li><strong>Easy to deploy</strong> - Just an API and a cron job</li><li><strong>Low resource usage</strong> - Ran on a tiny VM</li></ul><h3 class=heading id=the-bad>The Bad
+<a class=anchor href=#the-bad>#</a></h3><ul><li><strong>60-second latency</strong> - Metrics were always stale</li><li><strong>API latency tied to database</strong> - Slow DB = slow orders</li><li><strong>Silent failures</strong> - If cron died, dashboard just&mldr; stopped updating</li></ul><p>Joe was happy. The dashboard worked. Life was good.</p><hr><h2 class=heading id=chapter-2-the-growth-spurt-v2>Chapter 2: The Growth Spurt (V2)
+<a class=anchor href=#chapter-2-the-growth-spurt-v2>#</a></h2><p>Then something unexpected happened. A food blogger with 500k followers posted about Café Joe&rsquo;s flat white. Suddenly, orders went from 100/day to 100/hour. The V1 architecture started showing cracks:</p><ul><li>API response times spiked during lunch rush (database writes blocking)</li><li>60-second old data felt painfully stale during peak hours</li><li>The cron job occasionally timed out trying to aggregate too many orders</li></ul><p>Joe needed something better. Enter <strong>Redis Streams</strong>.</p><h3 class=heading id=the-v2-architecture>The V2 Architecture
+<a class=anchor href=#the-v2-architecture>#</a></h3><p>The key insight: <strong>decouple the API from the database write</strong>. Instead of writing directly to PostgreSQL, the API pushes orders to a Redis Stream. A background worker consumes the stream and handles persistence.</p><pre class=mermaid>flowchart LR
+    subgraph &#34;Customer Orders&#34;
+        A[☕ Order]
+    end
+
+    subgraph &#34;V2 Architecture&#34;
+        B[API&lt;br/&gt;FastAPI]
+        C[(Redis&lt;br/&gt;Streams)]
+        D[Stream&lt;br/&gt;Worker]
+        E[(PostgreSQL)]
+        F[(Redis&lt;br/&gt;Metrics)]
+        G[📊 Dashboard]
+    end
+
+    A --&gt;|POST /order| B
+    B --&gt;|XADD| C
+    C --&gt;|XREADGROUP| D
+    D --&gt;|Batch INSERT| E
+    D --&gt;|Real-time UPDATE| F
+    G --&gt;|GET metrics| F
+
+    style B fill:#90EE90
+    style C fill:#FFB6C1
+</pre><h3 class=heading id=the-magic-of-redis-streams>The Magic of Redis Streams
+<a class=anchor href=#the-magic-of-redis-streams>#</a></h3><p>Redis Streams gave Joe some superpowers:</p><ol><li><strong>Durability</strong> - Unlike Pub/Sub, messages persist even if no consumer is listening</li><li><strong>Consumer Groups</strong> - Track which messages have been processed</li><li><strong>Acknowledgments</strong> - Only remove messages after successful processing</li></ol><p>The API became blazing fast:</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-python data-lang=python><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>async</span> <span style=font-weight:700;text-decoration:underline>def</span> <span style=color:#666;font-weight:700;font-style:italic>create_order_v2</span>(order: OrderCreate, redis: Redis):
+</span></span><span style=display:flex><span>    message_id = <span style=font-weight:700;font-style:italic>str</span>(uuid.uuid4())  <span style=color:#888;font-style:italic># For deduplication</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=font-weight:700;text-decoration:underline>await</span> redis.xadd(<span style=color:#666;font-style:italic>&#34;orders&#34;</span>, {
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;message_id&#34;</span>: message_id,
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;drink&#34;</span>: order.drink,
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;store&#34;</span>: order.store,
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;price&#34;</span>: <span style=font-weight:700;font-style:italic>str</span>(order.price),
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;version&#34;</span>: <span style=color:#666;font-style:italic>&#34;v2&#34;</span>
+</span></span><span style=display:flex><span>    })
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=font-weight:700;text-decoration:underline>return</span> {<span style=color:#666;font-style:italic>&#34;status&#34;</span>: <span style=color:#666;font-style:italic>&#34;queued&#34;</span>, <span style=color:#666;font-style:italic>&#34;message_id&#34;</span>: message_id}
+</span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Returns in ~3ms instead of ~15ms!</span>
+</span></span></code></pre></div><p>The stream worker processed orders in batches:</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-python data-lang=python><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>async</span> <span style=font-weight:700;text-decoration:underline>def</span> <span style=color:#666;font-weight:700;font-style:italic>process_orders</span>():
+</span></span><span style=display:flex><span>    <span style=font-weight:700;text-decoration:underline>while</span> <span style=font-weight:700;text-decoration:underline>True</span>:
+</span></span><span style=display:flex><span>        <span style=color:#888;font-style:italic># Read up to 100 orders, or timeout after 2 seconds</span>
+</span></span><span style=display:flex><span>        messages = <span style=font-weight:700;text-decoration:underline>await</span> redis.xreadgroup(
+</span></span><span style=display:flex><span>            <span style=color:#666;font-style:italic>&#34;workers&#34;</span>, <span style=color:#666;font-style:italic>&#34;worker-1&#34;</span>, {<span style=color:#666;font-style:italic>&#34;orders&#34;</span>: <span style=color:#666;font-style:italic>&#34;&gt;&#34;</span>},
+</span></span><span style=display:flex><span>            count=100, block=2000
+</span></span><span style=display:flex><span>        )
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>        <span style=font-weight:700;text-decoration:underline>if</span> messages:
+</span></span><span style=display:flex><span>            <span style=color:#888;font-style:italic># Batch insert to PostgreSQL</span>
+</span></span><span style=display:flex><span>            orders = [parse_order(m) <span style=font-weight:700;text-decoration:underline>for</span> m <span style=font-weight:700>in</span> messages]
+</span></span><span style=display:flex><span>            <span style=font-weight:700;text-decoration:underline>await</span> batch_insert(orders)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            <span style=color:#888;font-style:italic># Update metrics in real-time</span>
+</span></span><span style=display:flex><span>            <span style=font-weight:700;text-decoration:underline>await</span> update_metrics(orders)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>            <span style=color:#888;font-style:italic># Acknowledge processed messages</span>
+</span></span><span style=display:flex><span>            <span style=font-weight:700;text-decoration:underline>await</span> redis.xack(<span style=color:#666;font-style:italic>&#34;orders&#34;</span>, <span style=color:#666;font-style:italic>&#34;workers&#34;</span>, *[m.id <span style=font-weight:700;text-decoration:underline>for</span> m <span style=font-weight:700>in</span> messages])
+</span></span></code></pre></div><h3 class=heading id=handling-duplicates>Handling Duplicates
+<a class=anchor href=#handling-duplicates>#</a></h3><p>Joe added a <code>message_id</code> column to handle potential duplicates (at-least-once delivery):</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-sql data-lang=sql><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>INSERT</span> <span style=font-weight:700;text-decoration:underline>INTO</span> orders (message_id, drink, store, price, <span style=font-weight:700;text-decoration:underline>timestamp</span>)
+</span></span><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>VALUES</span> (<span>$</span>1, <span>$</span>2, <span>$</span>3, <span>$</span>4, <span>$</span>5)
+</span></span><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>ON</span> CONFLICT (message_id) <span style=font-weight:700;text-decoration:underline>DO</span> <span style=font-weight:700;text-decoration:underline>NOTHING</span>;
+</span></span></code></pre></div><h3 class=heading id=the-results>The Results
+<a class=anchor href=#the-results>#</a></h3><table><thead><tr><th>Metric</th><th>V1</th><th>V2</th></tr></thead><tbody><tr><td>API Response Time</td><td>~15ms</td><td>~3ms</td></tr><tr><td>Metrics Latency</td><td>60 seconds</td><td>~200ms</td></tr><tr><td>Max Throughput</td><td>~100/sec</td><td>~500/sec</td></tr></tbody></table><p>Joe was thrilled. The dashboard updated in near real-time. API responses were snappy. Peak lunch rush was no longer scary.</p><hr><h2 class=heading id=chapter-3-the-franchise-dream-v3>Chapter 3: The Franchise Dream (V3)
+<a class=anchor href=#chapter-3-the-franchise-dream-v3>#</a></h2><p>Two years passed. Café Joe was now a local legend. Joe opened three more locations: <strong>Downtown</strong>, <strong>Airport</strong>, and <strong>Uptown</strong>. Orders hit 1000+ per second during morning rush.</p><p>The V2 architecture hit its ceiling:</p><ul><li>Single Python stream worker became CPU-bound</li><li>Redis Streams, while durable, lived entirely in memory</li><li>No way to scale horizontally - just one worker processing everything</li><li>Complex aggregations (per-store metrics, rolling windows) were getting hacky</li></ul><p>Joe needed industrial-grade streaming. Time to bring out the big guns: <strong>Apache Kafka</strong> and <strong>Apache Flink</strong>.</p><h3 class=heading id=the-v3-architecture>The V3 Architecture
+<a class=anchor href=#the-v3-architecture>#</a></h3><pre class=mermaid>flowchart TB
+    subgraph &#34;Customer Orders&#34;
+        A1[☕ Uptown]
+        A2[☕ Downtown]
+        A3[☕ Airport]
+    end
+
+    subgraph &#34;V3 Architecture&#34;
+        subgraph &#34;Ingestion&#34;
+            B[API&lt;br/&gt;FastAPI]
+            C[Kafka&lt;br/&gt;4 Partitions]
+        end
+
+        subgraph &#34;Stream Processing&#34;
+            D[Flink&lt;br/&gt;JobManager]
+            E1[TaskManager 1]
+            E2[TaskManager 2]
+        end
+
+        subgraph &#34;Storage&#34;
+            F[(PostgreSQL)]
+            G[(Redis&lt;br/&gt;Metrics)]
+        end
+
+        H[📊 Dashboard]
+    end
+
+    A1 --&gt; B
+    A2 --&gt; B
+    A3 --&gt; B
+    B --&gt;|Produce| C
+    C --&gt; D
+    D --&gt; E1
+    D --&gt; E2
+    E1 --&gt;|Sink| F
+    E1 --&gt;|Sink| G
+    E2 --&gt;|Sink| F
+    E2 --&gt;|Sink| G
+    H --&gt; G
+
+    style C fill:#FFD700
+    style D fill:#FF6347
+    style E1 fill:#FF6347
+    style E2 fill:#FF6347
+</pre><h3 class=heading id=why-kafka>Why Kafka?
+<a class=anchor href=#why-kafka>#</a></h3><p>Kafka gave Joe what Redis Streams couldn&rsquo;t:</p><ol><li><strong>Disk-based durability</strong> - Messages persist to disk, survive restarts</li><li><strong>Partitioning</strong> - Orders partitioned by store for parallel processing</li><li><strong>Replication</strong> - Data replicated across brokers for fault tolerance</li><li><strong>Replay</strong> - Can reprocess historical data from any point</li></ol><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-python data-lang=python><span style=display:flex><span><span style=font-weight:700;text-decoration:underline>async</span> <span style=font-weight:700;text-decoration:underline>def</span> <span style=color:#666;font-weight:700;font-style:italic>create_order_v3</span>(order: OrderCreate, producer: AIOKafkaProducer):
+</span></span><span style=display:flex><span>    message_id = <span style=font-weight:700;font-style:italic>str</span>(uuid.uuid4())
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=font-weight:700;text-decoration:underline>await</span> producer.send_and_wait(
+</span></span><span style=display:flex><span>        <span style=color:#666;font-style:italic>&#34;orders&#34;</span>,
+</span></span><span style=display:flex><span>        key=order.store.encode(),  <span style=color:#888;font-style:italic># Partition by store</span>
+</span></span><span style=display:flex><span>        value=json.dumps({
+</span></span><span style=display:flex><span>            <span style=color:#666;font-style:italic>&#34;message_id&#34;</span>: message_id,
+</span></span><span style=display:flex><span>            <span style=color:#666;font-style:italic>&#34;drink&#34;</span>: order.drink,
+</span></span><span style=display:flex><span>            <span style=color:#666;font-style:italic>&#34;store&#34;</span>: order.store,
+</span></span><span style=display:flex><span>            <span style=color:#666;font-style:italic>&#34;price&#34;</span>: <span style=font-weight:700;font-style:italic>float</span>(order.price),
+</span></span><span style=display:flex><span>            <span style=color:#666;font-style:italic>&#34;version&#34;</span>: <span style=color:#666;font-style:italic>&#34;v3&#34;</span>
+</span></span><span style=display:flex><span>        }).encode()
+</span></span><span style=display:flex><span>    )
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>    <span style=font-weight:700;text-decoration:underline>return</span> {<span style=color:#666;font-style:italic>&#34;status&#34;</span>: <span style=color:#666;font-style:italic>&#34;queued&#34;</span>, <span style=color:#666;font-style:italic>&#34;message_id&#34;</span>: message_id}
+</span></span></code></pre></div><h3 class=heading id=why-flink>Why Flink?
+<a class=anchor href=#why-flink>#</a></h3><p>Flink is a distributed stream processing engine that handles:</p><ol><li><strong>Parallel Processing</strong> - Multiple TaskManagers process different partitions</li><li><strong>Windowing</strong> - Aggregate data in time windows (tumbling, sliding, session)</li><li><strong>Exactly-Once Semantics</strong> - Checkpointing ensures no data loss or duplicates</li><li><strong>Stateful Processing</strong> - Maintain state across events (running totals, etc.)</li></ol><p>The Flink job (simplified):</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-java data-lang=java><span style=display:flex><span>DataStream&lt;CoffeeOrder&gt; orders = env
+</span></span><span style=display:flex><span>    .addSource(<span style=font-weight:700;text-decoration:underline>new</span> FlinkKafkaConsumer&lt;&gt;(<span style=color:#666;font-style:italic>&#34;orders&#34;</span>, ...))
+</span></span><span style=display:flex><span>    .filter(order -&gt; order.getVersion().equals(<span style=color:#666;font-style:italic>&#34;v3&#34;</span>));
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#888;font-style:italic>// Sink 1: Write to PostgreSQL with deduplication</span>
+</span></span><span style=display:flex><span>orders.addSink(<span style=font-weight:700;text-decoration:underline>new</span> PostgresSink());
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#888;font-style:italic>// Sink 2: Aggregate metrics per store in 1-second windows</span>
+</span></span><span style=display:flex><span>orders
+</span></span><span style=display:flex><span>    .keyBy(CoffeeOrder::getStore)
+</span></span><span style=display:flex><span>    .window(TumblingProcessingTimeWindows.of(Time.seconds(1)))
+</span></span><span style=display:flex><span>    .aggregate(<span style=font-weight:700;text-decoration:underline>new</span> MetricsAggregator())
+</span></span><span style=display:flex><span>    .addSink(<span style=font-weight:700;text-decoration:underline>new</span> RedisMetricsSink());
+</span></span></code></pre></div><h3 class=heading id=checkpointing-the-secret-sauce>Checkpointing: The Secret Sauce
+<a class=anchor href=#checkpointing-the-secret-sauce>#</a></h3><p>Flink&rsquo;s killer feature is <strong>checkpointing</strong>. Every 10 seconds, Flink snapshots:</p><ul><li>Current Kafka offsets</li><li>In-flight window state</li><li>Any accumulated aggregations</li></ul><p>If a TaskManager crashes, Flink restores from the last checkpoint and replays from Kafka. Zero data loss. Exactly-once processing.</p><pre tabindex=0><code>┌─────────────────────────────────────────────────────────┐
+│                    Checkpoint T=10s                     │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
+│  │ Kafka       │  │ Window      │  │ Pending     │      │
+│  │ Offsets     │  │ State       │  │ Writes      │      │
+│  │ P0: 1523    │  │ uptown: 42  │  │ [order_123, │      │
+│  │ P1: 892     │  │ downtown:38 │  │  order_124] │      │
+│  │ P2: 1101    │  │ airport: 15 │  │             │      │
+│  └─────────────┘  └─────────────┘  └─────────────┘      │
+└─────────────────────────────────────────────────────────┘
+</code></pre><h3 class=heading id=the-results-1>The Results
+<a class=anchor href=#the-results-1>#</a></h3><table><thead><tr><th>Metric</th><th>V1</th><th>V2</th><th>V3</th></tr></thead><tbody><tr><td>API Response Time</td><td>~15ms</td><td>~3ms</td><td>~5ms</td></tr><tr><td>Metrics Latency</td><td>60 sec</td><td>~200ms</td><td>~100ms</td></tr><tr><td>Max Throughput</td><td>~100/sec</td><td>~500/sec</td><td><strong>1000+/sec</strong></td></tr><tr><td>Delivery Guarantee</td><td>At-most-once</td><td>At-least-once</td><td><strong>Exactly-once</strong></td></tr><tr><td>Horizontal Scaling</td><td>❌</td><td>❌</td><td>✅</td></tr></tbody></table><hr><h2 class=heading id=the-crossover-points>The Crossover Points
+<a class=anchor href=#the-crossover-points>#</a></h2><p>When should you upgrade? Here&rsquo;s what Joe learned:</p><pre tabindex=0><code>┌────────────────────────────────────────────────────────────┐
+│                                                            │
+│  Orders/sec    Architecture Choice                         │
+│                                                            │
+│     0-100   →  V1 (Cron) - Keep it simple                  │
+│   100-500   →  V2 (Redis Streams) - Need real-time         │
+│   500+      →  V3 (Kafka+Flink) - Need scale               │
+│                                                            │
+│  ────────┬──────────┬───────────────────────────────────►  │
+│          │          │                                      │
+│         V1→V2     V2→V3                                    │
+│         ~100/s    ~500/s                                   │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+</code></pre><p><strong>Don&rsquo;t over-engineer early.</strong> V3 has significant operational complexity:</p><ul><li>Kafka cluster management</li><li>Flink JobManager/TaskManager orchestration</li><li>Java/Scala expertise for streaming jobs</li><li>Higher memory footprint (~3GB vs ~200MB)</li></ul><p>Start with V1. Graduate to V2 when you feel the pain. Only move to V3 when you&rsquo;re hitting V2&rsquo;s ceiling.</p><hr><h2 class=heading id=key-takeaways>Key Takeaways
+<a class=anchor href=#key-takeaways>#</a></h2><ol><li><p><strong>Start simple.</strong> A cron job is a perfectly valid real-time solution when &ldquo;real-time&rdquo; means &ldquo;within a minute.&rdquo;</p></li><li><p><strong>Decouple when needed.</strong> Moving writes to a queue (V2) gives you breathing room without massive complexity.</p></li><li><p><strong>Distributed streaming is powerful but expensive.</strong> Kafka + Flink is overkill until you genuinely need exactly-once semantics and horizontal scaling.</p></li><li><p><strong>The right architecture depends on your scale.</strong> There&rsquo;s no shame in running V1 forever if it meets your needs.</p></li><li><p><strong>Keep your dashboard dumb.</strong> All three versions write to the same Redis keys. The frontend never knew the difference.</p></li></ol><hr><h2 class=heading id=the-repository>The Repository
+<a class=anchor href=#the-repository>#</a></h2><p>The full source code is available at <a href=https://github.com/jfgrea27/coffee-rt>github.com/jfgrea27/coffee-rt</a>. This isn&rsquo;t just a toy example - it&rsquo;s a production-ready project with:</p><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody><tr><td><strong>CI/CD</strong></td><td>GitHub Actions for build, test, and deploy</td></tr><tr><td><strong>Test Coverage</strong></td><td>>85% across all components</td></tr><tr><td><strong>Dashboard UI</strong></td><td>Real-time React dashboard with live metrics</td></tr><tr><td><strong>Monitoring</strong></td><td>Grafana dashboards with Prometheus and Loki</td></tr><tr><td><strong>Infrastructure</strong></td><td>Full Terraform/Terragrunt setup for Azure</td></tr><tr><td><strong>Benchmarking</strong></td><td>Infrastructure ready, needs cloud credits for results</td></tr></tbody></table><p>The repository includes:</p><ul><li><strong>Backend services</strong> - FastAPI order API, stream workers, Flink jobs</li><li><strong>Frontend</strong> - React dashboard polling Redis for live updates</li><li><strong>Docker Compose</strong> - One-command local setup for each architecture version</li><li><strong>Helm charts</strong> - Production-ready Kubernetes deployments</li><li><strong>Monitoring stack</strong> - Grafana dashboards with Prometheus metrics and Loki logs</li><li><strong>Terraform modules</strong> - Modular Azure infrastructure (AKS, ACR, networking)</li><li><strong>Load testing</strong> - Breakpoint testing infrastructure with results upload</li></ul><hr><h2 class=heading id=want-to-see-real-benchmarks>Want to See Real Benchmarks?
+<a class=anchor href=#want-to-see-real-benchmarks>#</a></h2><p>The repository includes everything you need to run your own tests:</p><h3 class=heading id=a-note-on-benchmarking>A Note on Benchmarking
+<a class=anchor href=#a-note-on-benchmarking>#</a></h3><p>I started running scaling tests on my local machine, but quickly realised my laptop was becoming an unfair bottleneck - the CPU and memory constraints meant I was benchmarking my MacBook rather than the architectures themselves.</p><p>To get proper, reproducible numbers, I&rsquo;ve built out the full infrastructure to run these benchmarks on Azure (you can see the Terraform modules and Helm charts in the <a href=https://github.com/jfgrea27/coffee-rt>repository</a>).</p><h3 class=heading id=the-azure-infrastructure>The Azure Infrastructure
+<a class=anchor href=#the-azure-infrastructure>#</a></h3><p>The benchmarking infrastructure is built on <strong>Azure Kubernetes Service (AKS)</strong> using Terraform and Terragrunt for infrastructure-as-code. Here&rsquo;s what the setup looks like:</p><pre class=mermaid>flowchart TB
+    subgraph &#34;CI/CD&#34;
+        GH[GitHub Actions]
+        OIDC[GitHub OIDC]
+    end
+
+    subgraph &#34;Azure Infrastructure&#34;
+        subgraph &#34;Network&#34;
+            VNet[Virtual Network]
+            Bastion[Bastion VM]
+        end
+
+        subgraph &#34;Compute&#34;
+            AKS[AKS Cluster&lt;br/&gt;Private API]
+            ACR[Container Registry]
+        end
+
+        subgraph &#34;Storage&#34;
+            Blob[Blob Storage&lt;br/&gt;Load Test Results]
+        end
+    end
+
+    subgraph &#34;Kubernetes Workloads&#34;
+        API[Coffee-RT API]
+        LT[Load Tester]
+        WI[Workload Identity]
+    end
+
+    GH --&gt;|OIDC Auth| OIDC
+    OIDC --&gt;|Push Images| ACR
+    Bastion --&gt;|kubectl| AKS
+    AKS --&gt; API
+    AKS --&gt; LT
+    LT --&gt;|Workload Identity| WI
+    WI --&gt;|Upload Results| Blob
+    ACR --&gt;|Pull Images| AKS
+</pre><p><strong>Key components:</strong></p><table><thead><tr><th>Component</th><th>Purpose</th></tr></thead><tbody><tr><td><strong>AKS (Private)</strong></td><td>Kubernetes cluster with no public API exposure</td></tr><tr><td><strong>Bastion VM</strong></td><td>Jump box with kubectl, helm, k9s pre-installed</td></tr><tr><td><strong>ACR</strong></td><td>Private container registry for all images</td></tr><tr><td><strong>Workload Identity</strong></td><td>Pods authenticate to Azure without secrets</td></tr><tr><td><strong>GitHub OIDC</strong></td><td>CI/CD without long-lived credentials</td></tr><tr><td><strong>Blob Storage</strong></td><td>Stores load test results for analysis</td></tr></tbody></table><p><strong>The load testing workflow:</strong></p><ol><li>GitHub Actions builds and pushes images to ACR via OIDC</li><li>Helm deploys the load-tester to AKS</li><li>Load-tester runs breakpoint tests (ramping from 20 → 1000 concurrent users)</li><li>Results are uploaded to Blob Storage via workload identity</li><li><code>terraform destroy</code> tears everything down to save costs</li></ol><p>The infrastructure is modular - seven Terraform modules that can be deployed independently:</p><pre tabindex=0><code>infra/
+├── modules/
+│   ├── resource-group/    # Azure resource container
+│   ├── vnet/              # Network isolation
+│   ├── aks/               # Kubernetes cluster
+│   ├── acr/               # Container registry
+│   ├── bastion/           # Secure admin access
+│   ├── github-oidc/       # CI/CD authentication
+│   └── storage/           # Load test results
+└── environments/
+    └── dev/               # Cost-optimized dev config
+</code></pre><p><strong>The catch?</strong> Cloud costs. Even with spot instances and burstable VMs, running AKS clusters adds up quickly. I have to <code>terraform destroy</code> everything when I&rsquo;m not actively running tests to avoid burning through credits. If you&rsquo;d like to see real p95/p99 latency numbers and proper crossover point analysis, consider buying me a coffee to help cover the Azure bill.</p><p>Until then, happy brewing! ☕</p><hr><p><em>This post is part of a series exploring real-time data architectures. The fictional &ldquo;Café Joe&rdquo; is inspired by real architectural patterns used in production systems.</em></p></div></main></div><footer><p>Powered by
+<a href=https://gohugo.io/>Hugo</a>
+and
+<a href=https://github.com/tomfran/typo>tomfran/typo</a></p></footer><script type=module>
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true });
+  </script></body><script src=/js/theme-switch.js></script><script defer src=/js/copy-code.js></script></html>
