@@ -20,6 +20,12 @@ hideHeader = false
 homeIntroTitle = 'Hi!'
 homeIntroContent = """
 Hello! I'm James, a software engineer exploring **AI**, **distributed systems**, and all things code, and this is where I will write my findings!
+
+My website is organised into the following:
+
+- `blog` - where I discuss cool projects, thoughts and opinions;
+- `til` - where I frequently add today-i-learns
+- `journey` - where I dump any career/tech decisions made. 
 """
 
 # Collection to display on home
@@ -58,6 +64,14 @@ name = "posts"
 url = "/posts"
 
 [[params.menu]]
+name = "til"
+url = "/til"
+
+[[params.menu]]
+name = "journey"
+url = "/journey"
+
+[[params.menu]]
 name = "about"
 url = "/about"
 
@@ -65,6 +79,8 @@ url = "/about"
 [markup]
 [markup.highlight]
 style = 'algol'
+[markup.goldmark.renderer]
+unsafe = true
 
 # Giscus comments
 [params.giscus]

@@ -1,3 +1,14 @@
 :root {
   --main-width: 1200px;
 }
+
+.table-outer {
+  display: flex !important;
+  justify-content: center !important;
+}
+
+table {
+  width: auto !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}

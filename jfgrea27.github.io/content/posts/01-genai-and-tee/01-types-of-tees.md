@@ -97,15 +97,9 @@ Clearly, an increase in the TCB will increase the attack surface. Any vulnerabil
 
 **Example - Deploying a TEE on a Cloud provider**
 
-- build a simple postgres DB running in VM.
+In the repository [az-amd-sev-snp-playground](https://github.com/jfgrea27/az-amd-sev-snp-playground), you can deploy on Azure both a CPU and GPU AMD SEV-SNP. 
 
-**Discussion**
-
-### Confidential Containers
-
-**Architecture**
-
-**Example - K8S meets TEEs**
+Cloud providers such as `Azure` will actually add 
 
 **Discussion**
 
@@ -137,4 +131,12 @@ Smaller TCB might not always make sense, especially if your application has a si
 
 ### Remove Attestation
 
-TODO
+Remote attestation is a security mechanism that lets one computer (the _verifier_) cryptographically prove that another computer (the _prover_) is running **specifc, untamptered software on genuine trusted hardware**.
+
+Attestation works as follows:
+
+- When the trusted environment starts, the hardware computes **measurements** inluding code, initial data, configuration, etc. These are called **attestation measurements**.
+- The hardware signs these measurements using a **device-rooted key** that only genuine hardware has.
+- The remote party verifies the authenticity and tamper-proofness of these measurements via an attestation service.
+
+Since this process is specific to the hardware of the system, different TEEs will have different attestation flows.
