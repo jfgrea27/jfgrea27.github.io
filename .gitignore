@@ -1,2 +1,7 @@
 .direnv/
 **/public/* 
+videos/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
