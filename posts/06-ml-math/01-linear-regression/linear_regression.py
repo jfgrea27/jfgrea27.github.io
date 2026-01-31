@@ -24,7 +24,7 @@ for i in range(n_iterations):
     y_pred = theta_0 + theta_1 * X
 
     # Calculate MSE loss
-    loss = (1 / (2 * m)) * np.sum((y - y_pred) ** 2)
+    loss = (1 / m) * np.sum((y - y_pred) ** 2)
     losses.append(loss)
 
     # Calculate gradients

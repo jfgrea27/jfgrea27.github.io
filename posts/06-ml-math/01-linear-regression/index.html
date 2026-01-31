@@ -12,16 +12,16 @@
 \end{equation}
 $$</p><p>where $\hat{Y}$ represents the hypothesis height for our given $X$.
 Here $\theta_{1}$ is the gradient of the line and $\theta_{0}$ the intercept on the y-axis.</p><p>This is illustrated in the following animation:</p><img src=scatter-plot.gif alt="Animation of what linear regression aims to find" style="max-width:600px;display:block;margin:0 auto"><p>So to find the line of best fit, we need to determine the optimum values for $\theta_{0}, \theta_{1}$.</p><p>Geometricaly, as noted by the yellow lines, the line of best fit actually as the smallest distance between the line and $Y$ coordinate.</p><img src=y-distance.gif alt="Distance between observed y and hypothesis" style="max-width:600px;display:block;margin:0 auto"><p>Hence, if we try to reduce that distance, we will get the line of best fit.</p><p>For each $y_{i} \in Y$, the distance between $y_{i} - \hat{y{i}}$ can either be negative or positive. We can square the distance so that we always have a positive distance. This will prevent negative distances cancelling out the work of reducing the parameters $\theta_{0}, \theta_{1}$.</p><h2 class=heading id=mean-square-error>Mean Square Error
-<a class=anchor href=#mean-square-error>#</a></h2><p>Thus, what we are trying to do is find the smallest average of all the distances $y_{i} - \hat{y_{i}}$. This is know as the <strong>Mean Square Error</strong>.</p><p>More formally, we can write:</p><p>$$</p><p>MSE = \frac{1}{m}\sum(Y - \hat{Y})^2 = \frac{1}{m}\sum(Y - (\theta_{1}X + \theta_{0}))^2
+<a class=anchor href=#mean-square-error>#</a></h2><p>Thus, what we are trying to do is find the smallest average of all the distances $y_{i} - \hat{y_{i}}$. This is know as the <strong>Mean Square Error</strong>.</p><p>More formally, we can write:</p><p>$$</p><p>MSE = \frac{1}{m}\sum_{i=1}^{m}(Y - \hat{Y})^2 = \frac{1}{m}\sum_{i=1}^{m}(Y - (\theta_{1}X + \theta_{0}))^2
 $$</p><p>where the last equality holds by (1) above.</p><p>Hence, we can create the following cost function:</p><p>$$
 \begin{equation}
-J(\theta_{0}, \theta_{1}) = \frac{1}{m}\sum(Y - (\theta_{1}X + \theta_{0}))^2
+J(\theta_{0}, \theta_{1}) = \frac{1}{m}\sum_{i=1}^{m}(Y - (\theta_{1}X + \theta_{0}))^2
 \end{equation}
 $$</p><p>$$
 \begin{equation}
 Cost = \min(J(\theta_{0}, \theta_{1}))
 \end{equation}
-$$</p><p>As you can see, $J$ only has 2 variables (namely $\theta_{0}, \theta_{1}$), we can treat $X, Y$ as constants.</p><p>If we were to plot a 3-D graph of $f: (\theta_{0}, \theta_{1}) \rightarrow J(\theta_{0}, \theta_{1})$, it will look something like</p><img src=cost-surface.gif alt="A plot of cost function" style="max-width:600px;display:block;margin:0 auto"><p>This 3-D parabolic surface has a clear minima. This minima represents the the lowest cost (z-axis).</p><p>Suppose we start with arbitrary point on the surface, then we would try to iterate moving towards the minima of the surface as illustrated. This is known as <strong>Gradient Descent</strong> and is a very common technique in optimization to determine best solutions to cost functions.</p><p>Note: This works here because the surface has a nice shape, namely it is <strong>convex</strong>, which broadly means that the gradient is positive (or 0) everywhere. This means we can always descend closer to the minima of the cost. Other projections of cost functions are <strong>concave</strong>, which makes it impossible to apply gradient descent.</p><h2 class=heading id=derivation>Derivation
+$$</p><p>As you can see, $J$ only has 2 variables (namely $\theta_{0}, \theta_{1}$), we can treat $X, Y$ as constants.</p><p>If we were to plot a 3-D graph of $f: (\theta_{0}, \theta_{1}) \rightarrow J(\theta_{0}, \theta_{1})$, it will look something like</p><img src=cost-surface.gif alt="A plot of cost function" style="max-width:600px;display:block;margin:0 auto"><p>This 3-D parabolic surface has a clear minima. This minima represents the the lowest cost (z-axis).</p><p>Suppose we start with arbitrary point on the surface, then we would try to iterate moving towards the minima of the surface as illustrated. This is known as <strong>Gradient Descent</strong> and is a very common technique in optimization to determine best solutions to cost functions.</p><p>Note: This works here because the surface has a nice shape, namely it is <strong>convex</strong>, which means that the second derivative is not negative. This means we can always descend closer to the minima of the cost. Other projections of cost functions are <strong>concave</strong>, which makes it impossible to apply gradient descent.</p><h2 class=heading id=derivation>Derivation
 <a class=anchor href=#derivation>#</a></h2><p>For each variable $\theta_{0}, \theta_{1}$, we need to</p><ol><li>find the gradient at that point with respect to the given variable.</li><li>move some amount in a negative (towards the minima) of the surface.</li></ol><p>More formally, this can be written as</p><p>$$
 \begin{equation}
 \theta_{0}^k = \theta_{0}^{k-1} - \alpha\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{0}}}
@@ -31,28 +31,28 @@ $$</p><p>$$
 \theta_{1}^k = \theta_{1}^{k-1} - \alpha\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{1}}}
 \end{equation}
 $$</p><p>where $\alpha$ is a hyperparameter that represents the rate at which we move towards the minima.</p><p>Let&rsquo;s derive the partial derivatives!</p><p>Looking at $\theta_{0}$ initially:</p><p>$$
-\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{0}}} = \frac{\partial{\frac{1}{m}\sum(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{0}}}
-$$</p><p>as defined in (2).</p><p>Let $u =\frac{1}{m}\sum(Y - \theta_{1}X + \theta_{0})$, and so $\frac{\partial{u}}{\partial{\theta_{0}}} = -1$, then by the <strong>Chain Rule</strong>:</p><p>$$
-\frac{\partial{\frac{1}{m}\sum(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{0}}} = \frac{\partial{J(u)}}{\partial{u}} . \frac{\partial{u}}{\theta_{0}} = \frac{1}{m}2mu . -1 = -2u
+\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{0}}} = \frac{\partial{\frac{1}{m}\sum_{i=1}^{m}(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{0}}}
+$$</p><p>as defined in (2).</p><p>Let $u =\frac{1}{m}\sum_{i=1}^{m}(Y - \theta_{1}X + \theta_{0})$, and so $\frac{\partial{u}}{\partial{\theta_{0}}} = -1$, then by the <strong>Chain Rule</strong>:</p><p>$$
+\frac{\partial{\frac{1}{m}\sum_{i=1}^{m}(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{0}}} = \frac{\partial{J(u)}}{\partial{u}} . \frac{\partial{u}}{\theta_{0}} = \frac{1}{m}2mu . -1 = -2u
 $$</p><p>Here $\frac{\partial{J(u)}}{\partial{u}} = 2m$ since we are summing across all points.</p><p>Finally, we substitute $u$ to get</p><p>$$
 \begin{equation}
-\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{0}}} = \frac{-2}{m}\sum(Y - \hat{Y})
+\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{0}}} = \frac{-2}{m}\sum_{i=1}^{m}(Y - \hat{Y})
 \end{equation}
 $$</p><p>Similarly for $\theta{1}$:</p><p>$$
-\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{1}}} = \frac{\partial{\frac{1}{m}\sum(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{1}}}
-$$</p><p>as defined in (2).</p><p>Let $u =\frac{1}{m}\sum(Y - \theta_{1}X + \theta_{0})$, and so $\frac{\partial{u}}{\partial{\theta_{1}}} = -X$, then by the <strong>Chain Rule</strong>:</p><p>$$
-\frac{\partial{\frac{1}{m}\sum(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{1}}} = \frac{\partial{J(u)}}{\partial{u}} . \frac{\partial{u}}{\theta_{1}} = \frac{1}{m}2mu . -X = -2uX
+\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{1}}} = \frac{\partial{\frac{1}{m}\sum_{i=1}^{m}(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{1}}}
+$$</p><p>as defined in (2).</p><p>Let $u =\frac{1}{m}\sum_{i=1}^{m}(Y - \theta_{1}X + \theta_{0})$, and so $\frac{\partial{u}}{\partial{\theta_{1}}} = -X$, then by the <strong>Chain Rule</strong>:</p><p>$$
+\frac{\partial{\frac{1}{m}\sum_{i=1}^{m}(Y - (\theta_{1}X + \theta_{0}))^2}}{\partial{\theta_{1}}} = \frac{\partial{J(u)}}{\partial{u}} . \frac{\partial{u}}{\theta_{1}} = \frac{1}{m}2mu . -X = -2uX
 $$</p><p>Here again, $\frac{\partial{J(u)}}{\partial{u}} = 2m$ since we are summing across all points.</p><p>Finally, we substitute $u$ to get</p><p>$$
 \begin{equation}
-\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{1}}} = \frac{-2}{m}\sum(Y - \hat{Y})*X
+\frac{\partial{J(\theta_{0}, \theta_{1})}}{\partial{\theta_{1}}} = \frac{-2}{m}\sum_{i=1}^{m}(Y - \hat{Y})*X
 \end{equation}
 $$</p><p>Therefore, overall we have the following:</p><p>$$
 \begin{equation}
-\theta_{0}^k = \theta_{0}^{k-1} - \alpha\frac{-2}{m}\sum(Y - \theta_{1}X + \theta_{0})
+\theta_{0}^k = \theta_{0}^{k-1} - \alpha\frac{-2}{m}\sum_{i=1}^{m}(Y - \theta_{1}X + \theta_{0})
 \end{equation}
 $$</p><p>$$
 \begin{equation}
-\theta_{1}^k = \theta_{1}^{k-1} - \alpha\frac{-2}{m}\sum(Y - \theta_{1}X + \theta_{0})* X
+\theta_{1}^k = \theta_{1}^{k-1} - \alpha\frac{-2}{m}\sum_{i=1}^{m}(Y - \theta_{1}X + \theta_{0})* X
 \end{equation}
 $$</p><p>Since $\alpha$ is arbitrary, we can omit the $\frac{2}{m}$.</p><h2 class=heading id=code>Code
 <a class=anchor href=#code>#</a></h2><p>Let&rsquo;s look at a real example in <code>Python</code>. We will look at at <a href=https://www.kaggle.com/datasets/abhishek14398/salary-dataset-simple-linear-regression>Salary Dataset</a> from kaggle.com.</p><p>For this, you will require</p><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none><code class=language-txt data-lang=txt><span style=display:flex><span>matplotlib
@@ -95,18 +95,18 @@ $$</p><p>Since $\alpha$ is arbitrary, we can omit the $\frac{2}{m}$.</p><h2 clas
 </span></span><span style=display:flex><span>    y_pred = theta_0 + theta_1 * X
 </span></span><span style=display:flex><span>
 </span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Calculate MSE loss</span>
-</span></span><span style=display:flex><span>    loss = (1 / (2 * m)) * np.sum((y - y_pred) ** 2)
+</span></span><span style=display:flex><span>    loss = (1 / m) * np.sum((y - y_pred) ** 2)
 </span></span><span style=display:flex><span>    losses.append(loss)
 </span></span><span style=display:flex><span>
 </span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Calculate gradients</span>
-</span></span><span style=display:flex><span>    d_theta_0 = (1 / m) * np.sum(y - y_pred) <span style=color:#888;font-style:italic># equation 6</span>
-</span></span><span style=display:flex><span>    d_theta_1 = (1 / m) * np.sum((y - y_pred) * X) <span style=color:#888;font-style:italic># equation 7</span>
+</span></span><span style=display:flex><span>    d_theta_0 = (-2 / m) * np.sum(y - y_pred) <span style=color:#888;font-style:italic># equation 6</span>
+</span></span><span style=display:flex><span>    d_theta_1 = (-2 / m) * np.sum((y - y_pred) * X) <span style=color:#888;font-style:italic># equation 7</span>
 </span></span><span style=display:flex><span>
 </span></span><span style=display:flex><span>    <span style=color:#888;font-style:italic># Update parameters</span>
 </span></span><span style=display:flex><span>    theta_0 = theta_0 - alpha * d_theta_0 <span style=color:#888;font-style:italic># equation 8</span>
 </span></span><span style=display:flex><span>    theta_1 = theta_1 - alpha * d_theta_1 <span style=color:#888;font-style:italic># equation 9</span>
 </span></span></code></pre></div><p>The plot below shows the loss and the line of best fit:</p><img src=linear_regression_results.png alt="Plot of line of best fit and loss" style="max-width:600px;display:block;margin:0 auto"><p>So there you have it, linear regression explained from first principles!</p><h2 class=heading id=more-discussion>More discussion
-<a class=anchor href=#more-discussion>#</a></h2><p>It is worth mentioning that choosing a right <strong>learning rate</strong> $\alpha$ is crucial to help performance.</p><p>A too small will take too long, a too big may oscillate or diverge (miss the minima completely). The following is a rule of thumb:</p><table><thead><tr><th>Learning rate</th><th>Behavior</th></tr></thead><tbody><tr><td>Very small (e.g. 0.0001)</td><td>Slow convergence</td></tr><tr><td>Moderate (e.g. 0.01)</td><td>Stable, efficient learning</td></tr><tr><td>Large (e.g. 1.0)</td><td>Divergence / oscillation</td></tr></tbody></table></div><div class=single-pagination><hr><div class=flex><div class=single-pagination-prev><div class=single-pagination-container-prev><div class=single-pagination-text>←</div><div class=single-pagination-text><a href=/posts/06-ml-math/02-logistic-regression/>02 - Logistic regression</a></div></div></div><div class=single-pagination-next></div></div><hr></div><div class=back-to-top><a href=#top>back to top</a></div></div></main></div><footer><p>Powered by
+<a class=anchor href=#more-discussion>#</a></h2><p>It is worth mentioning that choosing a right <strong>learning rate</strong> $\alpha$ is crucial to help performance.</p><p>A too small will take too long, a too big may oscillate or diverge (miss the minima completely). The following is a rule of thumb:</p><table><thead><tr><th>Learning rate</th><th>Behavior</th></tr></thead><tbody><tr><td>Very small (e.g. 0.0001)</td><td>Slow convergence</td></tr><tr><td>Moderate (e.g. 0.01)</td><td>Stable, efficient learning</td></tr><tr><td>Large (e.g. 1.0)</td><td>Divergence / oscillation</td></tr></tbody></table></div><div class=back-to-top><a href=#top>back to top</a></div></div></main></div><footer><p>Powered by
 <a href=https://gohugo.io/>Hugo</a>
 and
 <a href=https://github.com/tomfran/typo>tomfran/typo</a></p></footer><link rel=stylesheet href=https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css><script defer src=https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js></script><script defer src=https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js onload=renderMathInElement(document.body)></script><script>document.addEventListener("DOMContentLoaded",function(){renderMathInElement(document.body,{delimiters:[{left:"$$",right:"$$",display:!0},{left:"$",right:"$",display:!1}]})})</script></body><script src=/js/theme-switch.js></script><script defer src=/js/copy-code.js></script></html>
