@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 - Feed-forward Neural Network</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/06-ml-math/">&larr; Maths behind ML and AI</a></p>
+<h1>02 - Feed-forward Neural Network</h1>
+<p><small>2026-01-31</small></p>
+<p>Neural networks are now <em>ubiquitous</em> and are the foundation for Large Language Models (LLMs).</p>
+<p>This article will explain the architecture of a simple Feed-forward Neural Network (FFNN), starting from first principles.</p>
+<h2 id="a-simple-perceptron">A simple perceptron</h2>
+<p>Neural networks are not new. Back in the 1950s, scientists were already researching <strong>perceptrons</strong>. A perceptron is a function that takes in an input vector, applies a higher order linear transformation to explore hidden dimensions, an activation function to fit complex relationship in the higher order space.</p>
+<p>Like other optimization problems, we can then use a loss function to compare the result of the perceptron with the expected value.</p>
+<p>To illustrate this, lets look at</p>
+<h2 id="a-brief-description-of-neural-networks">A brief description of Neural Networks</h2>
+<p>A feed-forward neural network (FFNN) is the simplest artificial neural network. It is composed of nodes that are organised in layers. Each layer is made up of a linear transformation of its input vector with a <strong>weights matrix</strong> and a <strong>bias</strong> sum. An <strong>activation function</strong> which centers the output of the node to be read by the next layer is used to ensure the input values of the next layer fall in a reasonable range.</p>
+<p><img src="ffnn.gif" alt="A simple FFNN" /></p>
+<p>The process of training a neural network is as follows:</p>
+<ol>
+<li>Featurise your dataset into a set of vectors.</li>
+<li>Feed the input vectors through the neural network.</li>
+<li>A cost function associated with the output of the last layer is used to calculate how far off the overall output is from the intended value.</li>
+<li>Apply back propagation through the network updating the values of the weights and bias parameters using a <strong>learning rate</strong></li>
+</ol>
+<p>The following illustrates the above process:</p>
+<p><img src="forward-pass.gif" alt="Forward pass for FFNN" /></p>
+<p><img src="back-propagation.gif" alt="Backward propagation for FNN" /></p>
+<p>The following hyper-parameters are required for building a FFNN:</p>
+<ul>
+<li>activation function to be used at a given layer.</li>
+<li>number of layers.</li>
+<li>learning rate.</li>
+</ul>
+<h2 id="derivations">Derivations</h2>
+<p>There are two equation to remember when dealing with neural networks is</p>
+<p>Linear transformation:</p>
+<div class="arithmatex">\[
+\begin{equation}
+Z = WX + b
+\end{equation}
+\]</div>
+<p>where <span class="arithmatex">\(W\)</span> represents a matrix of weights, <span class="arithmatex">\(X\)</span> is our input and <span class="arithmatex">\(b\)</span> is a bias.</p>
+<p>What this does is project the points in the input vector space into a new space. We update the values of <span class="arithmatex">\(W\)</span> (the linear transformation) in a way to minimise the loss function (a.k.a. how far we are from predicting the right output).</p>
+<p>Activation</p>
+<div class="arithmatex">\[
+\begin{equation}
+\sigma(z) = a(Z)
+\end{equation}
+\]</div>
+<p>This is used to add non-linear (a.k.a. complex patterns) to the learning between the layers.</p>
+<p>FFNN have a lot of parameters. To simplify, let's consider a small FFNN with 3 layers:</p>
+<ul>
+<li>Input layer: vectors of dimension 3</li>
+<li>Hidden layer: vector of dimension 2</li>
+<li>Output layer: vector of dimension 1</li>
+</ul>
+<p>So a feed forward would look like this</p>
+<p>input layer -&gt; hidden layer:</p>
+<div class="arithmatex">\[
+Z^1 = W^1X + b^1
+\]</div>
+<div class="arithmatex">\[
+\sigma(z)^1 = a(Z^1)
+\]</div>
+<p>hidden layer -&gt; output layer</p>
+<div class="arithmatex">\[
+Z^2 = W^2a(\sigma(z)^1) + b^2
+\]</div>
+<div class="arithmatex">\[
+\sigma(z)^2 = a(Z^2)
+\]</div>
+<p>We then apply some cost function (e.g. <strong>MSE</strong> or <strong>Cross Entropy</strong>).</p>
+<h2 id="geometric-intuition-behind-neural-networks">Geometric intuition behind neural networks</h2>
+<h2 id="backprogagation">Backprogagation</h2>
+<p>The Loss function (here we are using MSE) but there are other loss functions is a function of the following form</p>
+<p>Given that our resultant estimation is defined in terms of <span class="arithmatex">\(W^n\)</span> weights and <span class="arithmatex">\(b^n\)</span> biases, we can write <span class="arithmatex">\(\hat{y}\)</span> as follows:</p>
+<div class="arithmatex">\[
+\begin{equation}
+\hat{Y} = F(W^n; b^n)
+\end{equation}
+\]</div>
+<p>where <span class="arithmatex">\(F\)</span> represent the forward propagation with linear transformation and activation function explained above.</p>
+<p>We can now use a loss function (here MSE) for instance:</p>
+<div class="arithmatex">\[
+MSE = J(W^n, b^n) =  \frac{1}{m}\sum_{i=1}^{m}(Y - \hat{Y})^2 = \frac{1}{m}\sum_{i=1}^{m}(Y - F(W^n, b^n))^2
+\]</div>
+<p>where the last equality holds from above.</p>
+<p>Similar to <a href="../01-linear-regression/">01: Linear Regression</a>, we apply <strong>gradient descent</strong> to reduce the error between the measured and actual:</p>
+<div class="arithmatex">\[
+\begin{equation}
+W^{k} = W^{k-1} - \alpha\frac{\partial{J(W^{n},b^{n} )}}{\partial{W^{k-1}}}
+\end{equation}
+\]</div>
+<div class="arithmatex">\[
+\begin{equation}
+b^{k} = b^{k-1} - \alpha\frac{\partial{J(W^{n},b^{n} )}}{\partial{b^{k-1}}}
+\end{equation}
+\]</div>
+<p>We apply this gradient descent for each layer in the neural network.</p>
+<p>Let's look at the last layer in the neural network <span class="arithmatex">\(n\)</span></p>
+<div class="arithmatex">\[
+\frac{\partial{J(W^{n},b^{n} )}}{\partial{W^{n}}} = \frac{\partial{\frac{1}{m}\sum_{i=1}^{m}(Y - F(W^n, b^n))^2}}{\partial{W^{n}}}
+\]</div>
+<p>Setting <span class="arithmatex">\(u = Y - F(W^n, b^n)\)</span>, we get</p>
+<div class="arithmatex">\[
+\frac{\partial{J(W^{n},b^{n} )}}{\partial{W^{n}}} = \frac{\partial{\frac{1}{m}\sum_{i=1}^{m}(u)^2}}{\partial{u}} . \frac{\partial{u}}{\partial{W^{n}}} = \frac{1}{m}2mu .\frac{\partial{u}}{\partial{W^{n}}}
+\]</div>
+<p>Let's compute <span class="arithmatex">\(\frac{\partial{u}}{\partial{W^{n}}}\)</span>
+Recall that only <span class="arithmatex">\(-F(W^n, b^n)\)</span> actually is impacted by <span class="arithmatex">\(W^n\)</span>.</p>
+<p>Recall that <span class="arithmatex">\(F(W^{n}, b^{n}) = \sigma(W^{n}Z^{n-1} + b^{n})\)</span>
+where <span class="arithmatex">\(Z^{n-1}\)</span> is the result of the previous layer.</p>
+<p>This means</p>
+<div class="arithmatex">\[
+\frac{\partial{u}}{\partial{W^{n}}} = \frac{\partial{-F(W^n, b^n)}}{\partial{W^{n}}} = \frac{\partial{\sigma(W^{k}Z^{k-1} + b^{k})}}{\partial{W^{n}}}
+\]</div>
+<p>Applying chain rule again, setting <span class="arithmatex">\(v = W^{n}Z^{n-1} + b^{n}\)</span>, this gives</p>
+<div class="arithmatex">\[
+\frac{\partial{u}}{\partial{W^{n}}} = \frac{\partial{\sigma(v)}}{\partial{W^{n}}} = \frac{\partial{\sigma(v)}}{\partial{v}}\frac{\partial{v}}{\partial{W^{n}}}
+\]</div>
+<p>Recalling that <span class="arithmatex">\(\frac{\partial{v}}{\partial{W^{v}}} = Z^{n-1}\)</span>, we get </p>
+<div class="arithmatex">\[
+\frac{\partial{J(W^{n},b^{n} )}}{\partial{W^{n}}} = -\frac{\partial{\sigma(v)}}{\partial{v}}*Z^{n-1}
+\]</div>
+<p>Similar for <span class="arithmatex">\(b^n\)</span>, we get 
+$$
+\frac{\partial{J(W^{n},b^{n} )}}{\partial{b^{n}}} = -\frac{\partial{\sigma(v)}}{\partial{v}}
+$$</p>
+<p>Looking at the <span class="arithmatex">\(ith\)</span> layer now:</p>
+<div class="arithmatex">\[
+\frac{\partial{J(W^{n},b^{i} )}}{\partial{W^{i}}} = -\frac{\partial{\sigma(v^n)}}{\partial{v^n}}*Z^{n-1}\frac{\partial{\sigma(v^{n-1})}}{{\partial{v^{n-1}}}}...*\frac{\partial{\sigma(v^i)}}{\partial{v^i}}Z^{n-1}
+\]</div>
+<hr>
+<p>&larr; <a href="/posts/06-ml-math/01-linear-regression/">01 - Linear regression</a> | <a href="/posts/05-claude-code-workflows/">Claude Code: Lessons from the Trenches</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

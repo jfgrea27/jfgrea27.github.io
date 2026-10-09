@@ -1,25 +1,114 @@
-<!doctype html><html lang=en-uk dir=ltr><head><meta charset=utf-8><meta name=viewport content="width=device-width"><link rel=icon type=image/ico href=https://jfgrea27.github.io/favicon/favicon.ico><link rel=icon type=image/png sizes=16x16 href=https://jfgrea27.github.io/favicon/favicon-16x16.png><link rel=icon type=image/png sizes=32x32 href=https://jfgrea27.github.io/favicon/favicon-32x32.png><link rel=icon type=image/png sizes=192x192 href=https://jfgrea27.github.io/favicon/android-chrome-192x192.png><link rel=apple-touch-icon sizes=180x180 href=https://jfgrea27.github.io/favicon/apple-touch-icon.png><meta name=description content><title>01 - Types of TEEs | James Rea Blog</title><link rel=canonical href=https://jfgrea27.github.io/posts/01-genai-and-tee/01-types-of-tees/><meta property="og:url" content="https://jfgrea27.github.io/posts/01-genai-and-tee/01-types-of-tees/"><meta property="og:site_name" content="James Rea Blog"><meta property="og:title" content="01 - Types of TEEs"><meta property="og:description" content="A whistle stop tour of the types of TEEs."><meta property="og:locale" content="en_uk"><meta property="og:type" content="article"><meta property="article:section" content="posts"><meta property="article:published_time" content="2025-08-26T00:00:00+00:00"><meta property="article:modified_time" content="2025-08-26T00:00:00+00:00"><meta property="article:tag" content="Tee"><meta property="article:tag" content="Privacy"><link rel=stylesheet href=/assets/combined.min.92769f0c8addb7bcf9db875e83d0cb8f2148f28109b20f98f899ed3f7161b495.css media=all></head><body class=light><div style="position:fixed;top:20px;right:20px;z-index:1000;display:flex;align-items:center;gap:12px;background:var(--background);padding:8px 12px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)"><a href=https://www.linkedin.com/in/james-rea/ target=_blank rel="noopener noreferrer" title=LinkedIn style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 8a6 6 0 016 6v7h-4v-7a2 2 0 00-2-2 2 2 0 00-2 2v7h-4v-7a6 6 0 016-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
-</a><a href=https://github.com/jfgrea27 target=_blank rel="noopener noreferrer" title=GitHub style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37.0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44.0 0020 4.77 5.07 5.07.0 0019.91 1S18.73.65 16 2.48a13.38 13.38.0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07.0 005 4.77 5.44 5.44.0 003.5 8.55c0 5.42 3.3 6.61 6.44 7A3.37 3.37.0 009 18.13V22"/></svg>
-</a><a href=mailto:jfgrea27@gmail.com title=Email style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1.0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1.0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-</a><a href=/James_Rea___CV___December_2024___v4.pdf target=_blank title=CV style=color:inherit><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6A2 2 0 004 4v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-</a><a href=https://www.buymeacoffee.com/jfgrea27 target=_blank><img src=https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png alt="Buy Me A Coffee" style=height:40px!important;width:145px!important></a></div><div class=content><header><div class=header></div></header><main class=main><div class=breadcrumbs><a href=/>Home</a>
-<span class=breadcrumbs-separator>> </span><a href=/posts/>Posts</a>
-<span class=breadcrumbs-separator>> </span><a href=/posts/01-genai-and-tee/>GenAI and Trusted Execution Environments</a>
-<span class=breadcrumbs-separator>> </span><a class=breadcrumbs-current href=/posts/01-genai-and-tee/01-types-of-tees/>01 - Types of TEEs</a></div><div><div class=single-intro-container><h1 class=single-title>01 - Types of TEEs</h1><p class=single-summary>A whistle stop tour of the types of TEEs.</p><p class=single-readtime><time datetime=2025-08-26T00:00:00+00:00>August 26, 2025</time></p></div><div class=single-content><p>Trusted Execution Environments are special pieces of hardware that encrypt data in-use so to prevent attackers from compromising running applications.</p><p>Hardware providers including ARM, Intel and AMD have built various TEE solutions that depend on the scope of the <a href=#trusted-computing-base><strong>Trusted Computing Base</strong></a>.</p><ul><li>Intel&rsquo;s Secure Guard Extension (SGX)</li><li>AMD Secure Encrypted Virtulization with Secure Nested Paging (SEV-SNP)</li><li>ARM TrustZone</li><li>Confidential Computing (CoCo)</li></ul><p>For the sake of scope reduction, I will only explore Intel&rsquo;s SGX, AMD&rsquo;s SEV-SNP and CoCos, going from smallest TCB to largest TCB.</p><h2 class=heading id=the-tee-zoo>The TEE Zoo
-<a class=anchor href=#the-tee-zoo>#</a></h2><p>For each TEE solution, we will discuss</p><ul><li>its Architecture;</li><li>an example of a working TEE;</li><li>its use-cases.</li></ul><h3 class=heading id=intel-sgx>Intel SGX
-<a class=anchor href=#intel-sgx>#</a></h3><p><strong>Architecture</strong></p><p>The SGX architecture relies on creating a reserved region of memory, the <strong>Enclave Page Cache</strong> that holds encrypted data. This part of the memory is encrypted by special hardware that lives inside the CPU.
-During boot, the CPU will generate a hardware-derived key, the <strong>Root Sealing Key (RSK)</strong>, which is used by <strong>Memory Encryption Engine (MEE)</strong> (also living inside the CPU) to encrypt/decrypt any data leaving/entering the CPU.</p><p>Intel&rsquo;s SGX also includes special instruction sets including <code>ECREATE</code>, <code>EENTER</code>, etc., which help separate the User Runtime System (urts) from the Trusted Runtime System (trst).</p><p>No one, not even <code>root</code> user has access to the EPC in DRAM. Further, data is only decrypted inside the CPU, so L1/L2/L3 caches still hold encrypted data. The encryption process does have some performance overheads.</p><p>The control flow works as follows:</p><ol><li>Enclave is created using <code>ECREATE</code>;</li><li>Data is loaded using <code>EADD</code>;</li><li>Enclave is initialized using <code>EINIT</code>;</li><li>Enter the enclave using <code>EENTER</code>;</li><li>Run <em>trusted function</em>;</li><li>Exit the enclave using <code>EEXIT</code>.</li></ol><p>The <code>ECALL</code>/<code>OCALL</code> instructions allow calling urts/trst code from trst/urts respectively.</p><p><strong>Example - a minimal SGX enclave</strong></p><p>This <a href=https://github.com/jfgrea27/minimal-sgx-enclave>minimal-sgx-enclave</a> uses the <a href=https://github.com/intel/linux-sgx>sgx-linux</a> project.</p><p>We will assume you have installed <code>Intel SGX SDK</code> and <code>Intel SGX PSW</code>.</p><blockquote><p><strong><em>NOTE:</em></strong> I had some difficulties installing SGX Linux on my Ubuntu 24.04 box. <a href=https://codentium.com/setting-up-intel-sgx/>This article</a> was very useful</p></blockquote><div class=highlight><pre tabindex=0 style=background-color:#fff;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none><code class=language-sh data-lang=sh><span style=display:flex><span>git clone git@github.com:jfgrea27/minimal-sgx-enclave.git
-</span></span><span style=display:flex><span><span style=color:#888;font-style:italic># build</span>
-</span></span><span style=display:flex><span>make
-</span></span><span style=display:flex><span><span style=color:#888;font-style:italic># run</span>
-</span></span><span style=display:flex><span>./app
-</span></span></code></pre></div><p>You have ran your first enclave!</p><p>The repository explores SGX more in depth including:</p><ul><li><a href=https://github.com/jfgrea27/minimal-sgx-enclave/blob/main/README.md#sgx-ergonomics>SGX Ergonomics</a></li></ul><p><strong>Discussion</strong></p><p>As we have detailed in SGX&rsquo;s architecture above, the system relies on a very small TCB that includes the CPU and its microcode. Data is always stored in EPC (encrypted), which limits SGX use-cases to small applications, although Azure do provide some of their DCdsv3 series with up to 256GiB of EPC, as noted <a href="https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dcdsv3-series?tabs=sizebasic#sizes-in-series">here</a>.</p><p>It is worth noting that SGX are not fully immune. Since data is not encrypted in L1/L2/L3 caches, it is susceptible to side-channel attacks, including speculative execution attacks (e.g. <a href=https://meltdownattack.com/>Meltdown & Spectre</a>).</p><p>A typical use case for using SGX Intel as TEE would be smallish applications that require small trust - for instance a cryptographic key/password store.</p><p>There has been notable work around distributed SGX architecture (e.g <a href=https://arxiv.org/pdf/2207.05079>here</a>), which look interesting. However, the limitations of running SGX only on CPU and not GPU make AI workloads for instance limited.</p><h3 class=heading id=amd-sev-snp>AMD SEV-SNP
-<a class=anchor href=#amd-sev-snp>#</a></h3><p><strong>Architecture</strong>
-As we have seen in <a href=#intel-sgx>Intel SGX</a>, the memory limitations of the EPC make deploying large scale TEE applications in the SGX architecture pretty tricky.</p><p>AMD came up with a compromise: rather than have an enclave at the process level, why not make one at the <strong>VM</strong> level.</p><p>The advantages of forgoing this security are significant:</p><ul><li>Minimal changes to your applications are required to run it in an AMD SEV-SNP enclave; a lift-and-shit option if you want to deploy quickly.</li><li>More flexible sizes/general availability than Intel SGX.</li></ul><p>Clearly, an increase in the TCB will increase the attack surface. Any vulnerability in devices (e.g. compromised NICs) could be a threat due to the reduced isolation of the enclave.</p><p><strong>Example - Deploying a TEE on a Cloud provider</strong></p><p>In the repository <a href=https://github.com/jfgrea27/az-amd-sev-snp-playground>az-amd-sev-snp-playground</a>, you can deploy on Azure both a CPU and GPU AMD SEV-SNP.</p><p>Cloud providers such as <code>Azure</code> will actually add</p><p><strong>Discussion</strong></p><h2 class=heading id=lexicon>Lexicon
-<a class=anchor href=#lexicon>#</a></h2><h3 class=heading id=guest-vs-host-os>Guest vs Host OS
-<a class=anchor href=#guest-vs-host-os>#</a></h3><p>In the context of Virtual Machines (VMs), we distinguish Guest OS running the application inside the virtualized hardware from Host OS running the hypervisor.</p><p>In Type-1 hypervisors (or <em>bare-metal hypervisor</em>), there is no such Host OS.</p><p>In Type-2 hypervisor, there is a Host OS that runs the hypervisor amongst other applications.</p><p>Most cloud providers predominantly deploy applications in VMs running <a href=https://en.wikipedia.org/wiki/Hypervisor>Type-1 hypervisor</a>, as illustrated below</p><p><figure><div><img loading=lazy alt="alt text" src=hypervisor-types.png></div><div class=caption-container><figcaption>Types of hypervisor - (Wikipedia)</figcaption></div></figure></p><p>As a contrast, if you were to run a VM on your laptop, this would be a Type-2 hypervisor as your laptop OS is running the hypervisor (and guest OS) as well as other applications (like browser, etc.).</p><h3 class=heading id=trusted-computing-base>Trusted Computing Base
-<a class=anchor href=#trusted-computing-base>#</a></h3><p>The <strong>Trusted Computing Base (TCB)</strong> is the <em>minimum</em> set of hardware, firmware and software components that must be trusted to enforce the security properties of a system. If any part of the TCB is <em>compromised</em>, the security guarantees of the system (e.g. TEE) can be broken.</p><p>The smaller the TCB, the less must be trusted to be secure, hence better security.</p><p>In the context of TEEs, the TCB varies depending on the type of TEE. For instance, in Intel&rsquo;s SGX, the TCB is very small including CPU, enclave runtime and enclave code, whilst for AMD SEV-SNP, the TCB is larger since the entire guest OS must be trusted.</p><p>Smaller TCB might not always make sense, especially if your application has a significant memory footprint. Please read <a href=#the-tee-zoo>The TEE Zoo</a> for details on this.</p><h3 class=heading id=remove-attestation>Remove Attestation
-<a class=anchor href=#remove-attestation>#</a></h3><p>Remote attestation is a security mechanism that lets one computer (the <em>verifier</em>) cryptographically prove that another computer (the <em>prover</em>) is running <strong>specifc, untamptered software on genuine trusted hardware</strong>.</p><p>Attestation works as follows:</p><ul><li>When the trusted environment starts, the hardware computes <strong>measurements</strong> inluding code, initial data, configuration, etc. These are called <strong>attestation measurements</strong>.</li><li>The hardware signs these measurements using a <strong>device-rooted key</strong> that only genuine hardware has.</li><li>The remote party verifies the authenticity and tamper-proofness of these measurements via an attestation service.</li></ul><p>Since this process is specific to the hardware of the system, different TEEs will have different attestation flows.</p></div><div class=back-to-top><a href=#top>back to top</a></div></div></main></div><footer><p>Powered by
-<a href=https://gohugo.io/>Hugo</a>
-and
-<a href=https://github.com/tomfran/typo>tomfran/typo</a></p></footer></body><script src=/js/theme-switch.js></script><script defer src=/js/copy-code.js></script></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 - Types of TEEs</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css">
+
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/01-genai-and-tee/">&larr; GenAI and Trusted Execution Environments</a></p>
+<h1>01 - Types of TEEs</h1>
+<p><small>2025-08-26</small></p>
+<p>Trusted Execution Environments are special pieces of hardware that encrypt data in-use so to prevent attackers from compromising running applications.</p>
+<p>Hardware providers including ARM, Intel and AMD have built various TEE solutions that depend on the scope of the <a href="#trusted-computing-base"><strong>Trusted Computing Base</strong></a>.</p>
+<ul>
+<li>Intel's Secure Guard Extension (SGX)</li>
+<li>AMD Secure Encrypted Virtulization with Secure Nested Paging (SEV-SNP)</li>
+<li>ARM TrustZone</li>
+<li>Confidential Computing (CoCo)</li>
+</ul>
+<p>For the sake of scope reduction, I will only explore Intel's SGX, AMD's SEV-SNP and CoCos, going from smallest TCB to largest TCB.</p>
+<h2 id="the-tee-zoo">The TEE Zoo</h2>
+<p>For each TEE solution, we will discuss</p>
+<ul>
+<li>its Architecture;</li>
+<li>an example of a working TEE;</li>
+<li>its use-cases.</li>
+</ul>
+<h3 id="intel-sgx">Intel SGX</h3>
+<p><strong>Architecture</strong></p>
+<p>The SGX architecture relies on creating a reserved region of memory, the <strong>Enclave Page Cache</strong> that holds encrypted data. This part of the memory is encrypted by special hardware that lives inside the CPU.
+During boot, the CPU will generate a hardware-derived key, the <strong>Root Sealing Key (RSK)</strong>, which is used by <strong>Memory Encryption Engine (MEE)</strong> (also living inside the CPU) to encrypt/decrypt any data leaving/entering the CPU.</p>
+<p>Intel's SGX also includes special instruction sets including <code>ECREATE</code>, <code>EENTER</code>, etc., which help separate the User Runtime System (urts) from the Trusted Runtime System (trst).</p>
+<p>No one, not even <code>root</code> user has access to the EPC in DRAM. Further, data is only decrypted inside the CPU, so L1/L2/L3 caches still hold encrypted data. The encryption process does have some performance overheads.</p>
+<p>The control flow works as follows:</p>
+<ol>
+<li>Enclave is created using <code>ECREATE</code>;</li>
+<li>Data is loaded using <code>EADD</code>;</li>
+<li>Enclave is initialized using <code>EINIT</code>;</li>
+<li>Enter the enclave using <code>EENTER</code>;</li>
+<li>Run <em>trusted function</em>;</li>
+<li>Exit the enclave using <code>EEXIT</code>.</li>
+</ol>
+<p>The <code>ECALL</code>/<code>OCALL</code> instructions allow calling urts/trst code from trst/urts respectively.</p>
+<p><strong>Example - a minimal SGX enclave</strong></p>
+<p>This <a href="https://github.com/jfgrea27/minimal-sgx-enclave">minimal-sgx-enclave</a> uses the <a href="https://github.com/intel/linux-sgx">sgx-linux</a> project.</p>
+<p>We will assume you have installed <code>Intel SGX SDK</code> and <code>Intel SGX PSW</code>.</p>
+<blockquote>
+<p><strong><em>NOTE:</em></strong> I had some difficulties installing SGX Linux on my Ubuntu 24.04 box. <a href="https://codentium.com/setting-up-intel-sgx/">This article</a> was very useful</p>
+</blockquote>
+<pre><code class="language-sh">git clone git@github.com:jfgrea27/minimal-sgx-enclave.git
+# build
+make
+# run
+./app
+</code></pre>
+<p>You have ran your first enclave!</p>
+<p>The repository explores SGX more in depth including:</p>
+<ul>
+<li><a href="https://github.com/jfgrea27/minimal-sgx-enclave/blob/main/README.md#sgx-ergonomics">SGX Ergonomics</a></li>
+</ul>
+<p><strong>Discussion</strong></p>
+<p>As we have detailed in SGX's architecture above, the system relies on a very small TCB that includes the CPU and its microcode. Data is always stored in EPC (encrypted), which limits SGX use-cases to small applications, although Azure do provide some of their DCdsv3 series with up to 256GiB of EPC, as noted <a href="https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dcdsv3-series?tabs=sizebasic#sizes-in-series">here</a>.</p>
+<p>It is worth noting that SGX are not fully immune. Since data is not encrypted in L1/L2/L3 caches, it is susceptible to side-channel attacks, including speculative execution attacks (e.g. <a href="https://meltdownattack.com/">Meltdown &amp; Spectre</a>).</p>
+<p>A typical use case for using SGX Intel as TEE would be smallish applications that require small trust - for instance a cryptographic key/password store.</p>
+<p>There has been notable work around distributed SGX architecture (e.g <a href="https://arxiv.org/pdf/2207.05079">here</a>), which look interesting. However, the limitations of running SGX only on CPU and not GPU make AI workloads for instance limited.</p>
+<h3 id="amd-sev-snp">AMD SEV-SNP</h3>
+<p><strong>Architecture</strong>
+As we have seen in <a href="#intel-sgx">Intel SGX</a>, the memory limitations of the EPC make deploying large scale TEE applications in the SGX architecture pretty tricky.</p>
+<p>AMD came up with a compromise: rather than have an enclave at the process level, why not make one at the <strong>VM</strong> level.</p>
+<p>The advantages of forgoing this security are significant:</p>
+<ul>
+<li>Minimal changes to your applications are required to run it in an AMD SEV-SNP enclave; a lift-and-shit option if you want to deploy quickly.</li>
+<li>More flexible sizes/general availability than Intel SGX.</li>
+</ul>
+<p>Clearly, an increase in the TCB will increase the attack surface. Any vulnerability in devices (e.g. compromised NICs) could be a threat due to the reduced isolation of the enclave.</p>
+<p><strong>Example - Deploying a TEE on a Cloud provider</strong></p>
+<p>In the repository <a href="https://github.com/jfgrea27/az-amd-sev-snp-playground">az-amd-sev-snp-playground</a>, you can deploy on Azure both a CPU and GPU AMD SEV-SNP. </p>
+<p>Cloud providers such as <code>Azure</code> will actually add </p>
+<p><strong>Discussion</strong></p>
+<h2 id="lexicon">Lexicon</h2>
+<h3 id="guest-vs-host-os">Guest vs Host OS</h3>
+<p>In the context of Virtual Machines (VMs), we distinguish Guest OS running the application inside the virtualized hardware from Host OS running the hypervisor.</p>
+<p>In Type-1 hypervisors (or <em>bare-metal hypervisor</em>), there is no such Host OS.</p>
+<p>In Type-2 hypervisor, there is a Host OS that runs the hypervisor amongst other applications.</p>
+<p>Most cloud providers predominantly deploy applications in VMs running <a href="https://en.wikipedia.org/wiki/Hypervisor">Type-1 hypervisor</a>, as illustrated below</p>
+<p><img alt="alt text" src="hypervisor-types.png" title="Types of hypervisor - (Wikipedia)" /></p>
+<p>As a contrast, if you were to run a VM on your laptop, this would be a Type-2 hypervisor as your laptop OS is running the hypervisor (and guest OS) as well as other applications (like browser, etc.).</p>
+<h3 id="trusted-computing-base">Trusted Computing Base</h3>
+<p>The <strong>Trusted Computing Base (TCB)</strong> is the <em>minimum</em> set of hardware, firmware and software components that must be trusted to enforce the security properties of a system. If any part of the TCB is <em>compromised</em>, the security guarantees of the system (e.g. TEE) can be broken.</p>
+<p>The smaller the TCB, the less must be trusted to be secure, hence better security.</p>
+<p>In the context of TEEs, the TCB varies depending on the type of TEE. For instance, in Intel's SGX, the TCB is very small including CPU, enclave runtime and enclave code, whilst for AMD SEV-SNP, the TCB is larger since the entire guest OS must be trusted.</p>
+<p>Smaller TCB might not always make sense, especially if your application has a significant memory footprint. Please read <a href="#the-tee-zoo">The TEE Zoo</a> for details on this.</p>
+<h3 id="remove-attestation">Remove Attestation</h3>
+<p>Remote attestation is a security mechanism that lets one computer (the <em>verifier</em>) cryptographically prove that another computer (the <em>prover</em>) is running <strong>specifc, untamptered software on genuine trusted hardware</strong>.</p>
+<p>Attestation works as follows:</p>
+<ul>
+<li>When the trusted environment starts, the hardware computes <strong>measurements</strong> inluding code, initial data, configuration, etc. These are called <strong>attestation measurements</strong>.</li>
+<li>The hardware signs these measurements using a <strong>device-rooted key</strong> that only genuine hardware has.</li>
+<li>The remote party verifies the authenticity and tamper-proofness of these measurements via an attestation service.</li>
+</ul>
+<p>Since this process is specific to the hardware of the system, different TEEs will have different attestation flows.</p>
+<hr>
+<p>&larr; <a href="/posts/01-genai-and-tee/">GenAI and Trusted Execution Environments</a></p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>
