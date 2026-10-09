@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linux I/O models</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=3">
+
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<h1>Linux I/O models</h1>
+<p><small>2026-10-09</small></p>
+<p>Every time you <code>await</code> something in Python, spawn a goroutine in Go, or write a Tokio handler in Rust, something underneath has to answer a simple question: <strong>what does my process do while the data isn't there yet?</strong></p>
+<p>Linux gives you 5 answers to that question, the 5 I/O models:</p>
+<ol>
+<li><strong>Blocking I/O</strong>: the process sleeps until the data is ready.</li>
+<li><strong>Non-blocking I/O</strong>: the call returns immediately and the caller busy loops/polls for results.</li>
+<li><strong>I/O multiplexing</strong>: one thread waits on many <strong>File Descriptors (FD)</strong>.</li>
+<li><strong>Signal-driven I/O</strong>: the kernel raises a signal when an FD is ready.</li>
+<li><strong>Asynchronous I/O</strong>: the kernel notifies on completion.</li>
+</ol>
+<p>This article goes through each of them with small C programs, and uses <code>strace</code> to see what is really happening between the process and the kernel. All the code can be found in my <a href="https://github.com/jfgrea27/lowlevel/tree/main/learnings/linux-io-models">lowlevel</a> repository. The examples were run on Linux (an <code>aarch64</code> VM), so if you're on macOS you'll need a VM or container to follow along.</p>
+<hr />
+<h2 id="file-descriptors">File descriptors</h2>
+<p>I/O is the process of reading &amp; writing data, to a file, a stream or a socket. Each Linux process keeps track of which of these are open in its <strong>File Descriptor Table</strong>.</p>
+<p>Initially, a process has 3 FDs: <code>stdin</code>, <code>stdout</code> and <code>stderr</code>. You can inspect a process' FDs through <code>/proc/&lt;PID&gt;/fd/*</code> (or <code>/proc/self/fd/*</code> from within the process).</p>
+<p>Let's take a very simple <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/00-fd-demo/main.c">fd-demo</a>:</p>
+<pre><code class="language-c">// 00-fd-demo/main.c
+#include &lt;stdio.h&gt;
+
+int main(void)
+{
+    char line[256];
+
+    // stdin/stdout/stderr
+    fgets(line, sizeof line, stdin);
+    printf(&quot;out: %s&quot;, line);
+    fprintf(stderr, &quot;err: %s&quot;, line);
+
+    // adding an fd:
+    FILE *log = fopen(&quot;log.txt&quot;, &quot;w&quot;);
+    fprintf(log, &quot;log: %s&quot;, line);
+    fclose(log);
+
+    return 0;
+}
+</code></pre>
+<p>Let's compile it and step through it with <code>gdb</code>:</p>
+<pre><code class="language-sh">cd 00-fd-demo
+gcc -g main.c -o main # note the -g is for debugging.
+
+gdb ./main
+</code></pre>
+<pre><code class="language-txt">(gdb) info proc
+(gdb) run
+(gdb) n
+...
+# before fopen
+(gdb) shell ls -l /proc/PID/fd
+lrwx------ 1 user group 64 Oct  6 09:41 0 -&gt; /dev/pts/0
+lrwx------ 1 user group 64 Oct  6 09:41 1 -&gt; /dev/pts/0
+lrwx------ 1 user group 64 Oct  6 09:41 2 -&gt; /dev/pts/0
+(gdb) n
+# after fopen
+(gdb) shell ls -l /proc/PID/fd
+lrwx------ 1 user group 64 Oct  6 09:25 0 -&gt; /dev/pts/0
+lrwx------ 1 user group 64 Oct  6 09:25 1 -&gt; /dev/pts/0
+lrwx------ 1 user group 64 Oct  6 09:25 2 -&gt; /dev/pts/0
+l-wx------ 1 user group 64 Oct  6 09:41 3 -&gt; /path/to/linux-io-models/00-fd-demo/log.txt
+(gdb) n
+...
+# after fclose
+(gdb) shell ls -l /proc/PID/fd
+lrwx------ 1 user group 64 Oct  6 09:41 0 -&gt; /dev/pts/0
+lrwx------ 1 user group 64 Oct  6 09:41 1 -&gt; /dev/pts/0
+lrwx------ 1 user group 64 Oct  6 09:41 2 -&gt; /dev/pts/0
+</code></pre>
+<p>As you can see, a new FD (<code>3</code>) is recorded in the process when we open the file, and removed once we close it. FDs <code>0</code>, <code>1</code> and <code>2</code> are <code>stdin</code>, <code>stdout</code> and <code>stderr</code>, all pointing at the terminal (<code>/dev/pts/0</code>).</p>
+<p>Everything that follows is about how a process waits on one (or many) of these FDs.</p>
+<hr />
+<h2 id="1-blocking-io">1. Blocking I/O</h2>
+<p><strong>TLDR;</strong> the process is blocked during I/O.</p>
+<p>System calls: <code>read()</code> and <code>write()</code>. This is the default.</p>
+<p>Under the hood, the thread sleeps until the data has been copied from kernel space into the user space buffer.</p>
+<p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/01-blocking-io/main.c">example</a>. Here, the important line is:</p>
+<pre><code class="language-c">// ...
+    ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+// ...
+</code></pre>
+<p>This reads from the <code>stdin</code> FD into the empty buffer <code>buf</code>.</p>
+<p>To make the wait visible, we pipe in <code>(sleep 3; echo hi)</code>, which:</p>
+<ol>
+<li>sleeps for 3s, then</li>
+<li>echoes "hi", then</li>
+<li>pipes the "hi" into our <code>./main</code>.</li>
+</ol>
+<p>Our program starts straight away, but can only read the data once it is in the pipe:</p>
+<pre><code class="language-sh"># compile
+gcc -O0 main.c -g -o main
+# inspect
+(sleep 3; echo hi) | strace -T -e trace=read,fcntl ./main
+# output:
+# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000122&gt;
+## sleeps for 3 seconds
+# read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;2.996911&gt;
+# read 3 bytes
+# +++ exited with 0 +++
+</code></pre>
+<p>(The first <code>read(3, "\177ELF...")</code> is just the dynamic loader reading <code>libc</code>, you'll see it in every example.)</p>
+<p>The <code>-T</code> flag shows the time spent in each syscall: <code>&lt;2.996911&gt;</code>. The main thread was stuck inside <code>read()</code> for the full 3 seconds, unable to do anything else.</p>
+<hr />
+<h2 id="2-non-blocking-io">2. Non-blocking I/O</h2>
+<p><strong>TLDR;</strong> the process is not blocked during I/O, but has to keep asking.</p>
+<p>System calls: <code>read()</code> and <code>write()</code>, with the additional <code>O_NONBLOCK</code> flag set on the FD.</p>
+<p>Under the hood, if the data isn't ready, <code>read()</code> returns straight away with an error. The thread can then do some work and poll the kernel again later.</p>
+<p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/02-non-blocking-io/main.c">example</a>. Here, the important lines are:</p>
+<pre><code class="language-c">    // adding the flags including `O_NONBLOCK`.
+    int fl = fcntl(0, F_GETFL);
+    fcntl(0, F_SETFL, fl | O_NONBLOCK);
+
+// ...
+    for (int tries = 0;; tries++) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        // ...
+        if (errno != EAGAIN)
+        {
+            perror(&quot;read&quot;);
+            break;
+        }
+        usleep(1000); // busy doing work.
+        // ...
+    }
+// ...
+</code></pre>
+<p>This time, with the same <code>(sleep 3; echo hi)</code>, the main thread is not blocked (it can do work):</p>
+<pre><code class="language-sh"># compile
+gcc -O0 main.c -g -o main
+# inspect
+(sleep 3; echo hi) | strace -T -e trace=read,fcntl ./main
+# output:
+# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000073&gt;
+# fcntl(0, F_GETFL)                       = 0 (flags O_RDONLY) &lt;0.000077&gt;
+# fcntl(0, F_SETFL, O_RDONLY|O_NONBLOCK)  = 0 &lt;0.000076&gt;
+# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000047&gt;
+# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000063&gt;
+# ... 3 seconds worth of these.
+# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000046&gt;
+# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000065&gt;
+# read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;0.000182&gt;
+# got 3 bytes after 29 tries
+# +++ exited with 0 +++
+</code></pre>
+<p>We now get an <code>EAGAIN</code> error code, which means "nothing here yet, try again". Each <code>read()</code> takes microseconds instead of seconds, so the thread is free between calls.</p>
+<p>The flow for the program is:</p>
+<ol>
+<li>Is there some data to consume? No, go to step 2; Yes, go to step 4.</li>
+<li>Do something else for X amount of time.</li>
+<li>Go to step 1.</li>
+<li>Consume the data available.</li>
+</ol>
+<p>Here the main thread acts as its own event loop. The catch: every one of those <code>EAGAIN</code>s is a syscall, and syscalls are expensive. Poll too often and you burn CPU; poll too rarely and you add latency.</p>
+<hr />
+<h2 id="3-io-multiplexing">3. I/O multiplexing</h2>
+<p><strong>TLDR;</strong> block, but on many FDs at once.</p>
+<p>System calls: <code>select()</code>, <code>poll()</code>, <code>epoll_wait()</code>.</p>
+<p>Multiplexing takes <a href="#1-blocking-io">1. Blocking I/O</a> and applies it to many FDs. Rather than blocking inside <code>read()</code>, we block inside <code>poll()</code>, which tells us which FD is ready. Then, the <code>read()</code> on that FD is guaranteed not to block.</p>
+<p><code>poll</code> takes a list of <code>pollfd</code>:</p>
+<pre><code class="language-c">struct pollfd {
+    int   fd;         /* file descriptor */
+    short events;     /* requested events */
+    short revents;    /* returned events */
+};
+</code></pre>
+<p><code>events</code> goes from user to kernel space ("tell me when this happens"), and <code>revents</code> (r = returned) goes from kernel to user space ("this is what happened"). Have a look at <code>man 2 poll</code> for all the event types.</p>
+<p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/03-multiplexing-io/main.c">example</a>. Here, the important lines are:</p>
+<pre><code class="language-c">    // define a list of pollfds
+    struct pollfd fds[MAX_FDS];
+    // open the file descriptors
+    for (int i = 0; i &lt; nfds; i++)
+    {
+        fds[i].fd = open(argv[i + 1], O_RDONLY);
+        // ...
+        fds[i].events = POLLIN; // tell me when it's readable
+    }
+
+    while (remaining &gt; 0)
+    {
+        // Sleep until at least one fd is ready (-1 = no timeout)
+        int ready = poll(fds, nfds, -1);
+        // ...
+        for (int i = 0; i &lt; nfds; i++)
+        {
+            if (!(fds[i].revents &amp; (POLLIN | POLLHUP | POLLERR)))
+                continue; // this one isn't ready
+
+            char buf[4096];
+            ssize_t n = read(fds[i].fd, buf, sizeof buf); // won't block: poll said ready
+            if (n &gt; 0)
+            {
+                printf(&quot;source %d: %.*s&quot;, i, (int)n, buf);
+            }
+            else
+            { // 0 = EOF (or error): stop watching it
+                close(fds[i].fd);
+                fds[i].fd = -1; // poll ignores negative fds
+                remaining--;
+            }
+        }
+    }
+</code></pre>
+<p>The flow is:</p>
+<ol>
+<li>Register the file descriptors.</li>
+<li><code>poll</code> the kernel. This blocks until at least one FD is ready.</li>
+<li>Read from the ready FDs. This won't block since the data has arrived (as signalled by step 2).</li>
+</ol>
+<p>With <a href="#1-blocking-io">1. Blocking I/O</a>, running 2 I/O operations in a single thread runs them sequentially. With multiplexing, they run concurrently. Let's feed in a slow source (3s) and a fast one (1s):</p>
+<pre><code class="language-sh"># compile
+gcc -O0 main.c -g -o main
+# inspect
+time strace -T -e trace=read,ppoll ./main &lt;(sleep 3; echo slow) &lt;(sleep 1; echo fast)
+
+# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000116&gt;
+# ppoll([{fd=3, events=POLLIN}, {fd=4, events=POLLIN}], 2, NULL, NULL, 0) = 1 ([{fd=4, revents=POLLIN}]) &lt;0.995887&gt;
+# read(4, &quot;fast\n&quot;, 4096)                 = 5 &lt;0.000010&gt;
+# source 1: fast
+# ppoll([{fd=3, events=POLLIN}, {fd=4, events=POLLIN}], 2, NULL, NULL, 0) = 1 ([{fd=4, revents=POLLHUP}]) &lt;0.000052&gt;
+# read(4, &quot;&quot;, 4096)                       = 0 &lt;0.000087&gt;
+# ppoll([{fd=3, events=POLLIN}, {fd=-1}], 2, NULL, NULL, 0) = 1 ([{fd=3, revents=POLLIN}]) &lt;1.998587&gt;
+# read(3, &quot;slow\n&quot;, 4096)                 = 5 &lt;0.000037&gt;
+# source 0: slow
+# ppoll([{fd=3, events=POLLIN}, {fd=-1}], 2, NULL, NULL, 0) = 1 ([{fd=3, revents=POLLHUP}]) &lt;0.000047&gt;
+# read(3, &quot;&quot;, 4096)                       = 0 &lt;0.000046&gt;
+# +++ exited with 0 +++
+
+# real    0m3.009s
+# user    0m0.001s
+# sys     0m0.014s
+</code></pre>
+<p>The whole thing takes <strong>3 seconds, not 3 + 1 seconds</strong>: the two waits overlap.</p>
+<p>Reading the trace: the first <code>ppoll</code> wakes up after ~1s with FD 4 (<code>fast</code>) ready. The next <code>ppoll</code> returns <code>POLLHUP</code> (hang up, no more data) for FD 4, so we close it. The last <code>ppoll</code>s wait the remaining ~2s for FD 3 (<code>slow</code>).</p>
+<p>One drawback of <code>select</code>/<code>poll</code> is that every call hands the kernel the full list of FDs, and the kernel (and then your program) scans all of it to find the ready ones: <code>O(N)</code> per call. This is fine for a handful of FDs, but not for a server with 10k connections. That's what <code>epoll</code> fixes: you register FDs once, and <code>epoll_wait</code> only returns the ones that are ready. It's the same model, just scalable, and it's what most runtimes use under the hood (more on that <a href="#so-what-does-my-higher-level-language-use">below</a>).</p>
+<hr />
+<h2 id="4-signal-driven-io">4. Signal-driven I/O</h2>
+<p><strong>TLDR;</strong> the kernel interrupts the process when an FD is ready.</p>
+<p>System calls: <code>sigaction()</code> and <code>fcntl()</code> with <code>F_SETOWN</code> and <code>O_ASYNC</code>.</p>
+<p>In both <a href="#2-non-blocking-io">2. Non-blocking I/O</a> and <a href="#3-io-multiplexing">3. I/O multiplexing</a>, the caller (user space) asks the kernel whether data is ready. What if we flip it, and let the kernel signal the user space program instead?</p>
+<p>This is what signal-driven I/O looks like.</p>
+<p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/04-signal-driven-io/main.c">example</a>. Here, the important lines are:</p>
+<pre><code class="language-c">    // 1. Install a handler for SIGIO
+    struct sigaction sa = {0}; // set the sigaction struct to default 0s.
+    sa.sa_handler = on_sigio;  // call on_sigio when the signal arrives (callback)
+    sigemptyset(&amp;sa.sa_mask);  // don't block any other signals while in the handler.
+    sigaction(SIGIO, &amp;sa, NULL); // wire up SIGIO to the handler.
+
+    // 2. Tell the kernel which process gets the signal
+    fcntl(STDIN_FILENO, F_SETOWN, getpid());
+
+    // 3. Turn on signal-driven mode (plus non-blocking, so draining can't hang)
+    int flags = fcntl(STDIN_FILENO, F_GETFL);
+    fcntl(STDIN_FILENO, F_SETFL, flags | O_ASYNC | O_NONBLOCK);
+</code></pre>
+<p>The remaining code does some "work" in a loop and, once the handler has flagged that data is ready, reads it into a buffer.</p>
+<pre><code class="language-sh"># compile
+gcc -O0 main.c -g -o main
+# inspect
+(sleep 3; echo hi) | strace -T -e trace=read,fcntl ./main
+
+# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000050&gt;
+# fcntl(0, F_SETOWN, 25191)               = 0 &lt;0.000099&gt;
+# fcntl(0, F_GETFL)                       = 0 (flags O_RDONLY) &lt;0.000150&gt;
+# fcntl(0, F_SETFL, O_RDONLY|O_NONBLOCK|FASYNC) = 0 &lt;0.000076&gt;
+## 3 seconds of work, no syscalls
+# --- SIGIO {si_signo=SIGIO, si_code=SI_KERNEL} ---
+# --- SIGIO {si_signo=SIGIO, si_code=SI_KERNEL} ---
+# read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;0.000345&gt;
+# got 3 bytes after 29 units of work: hi
+# read(0, &quot;&quot;, 4096)                       = 0 &lt;0.000152&gt;
+</code></pre>
+<p>Compare this with <a href="#2-non-blocking-io">2. Non-blocking I/O</a>: the same 29 units of work, but no wall of <code>EAGAIN</code>s. The process makes no syscalls while it waits, and the kernel delivers a <code>SIGIO</code> when the pipe has data (and again when the writer closes it, hence the two signals).</p>
+<p>Sounds great, so why is it so rarely used? Signals are awkward to program with: the handler can interrupt your code at any point, you can only safely do a handful of things inside it, and a <code>SIGIO</code> doesn't tell you <em>which</em> FD is ready. With many FDs, you're back to checking each one.</p>
+<hr />
+<h2 id="5-asynchronous-io">5. Asynchronous I/O</h2>
+<p><strong>TLDR;</strong> hand the whole I/O operation to the kernel, and collect the result once it's done.</p>
+<p>System calls: <code>io_uring_setup()</code>, <code>io_uring_enter()</code> (usually via <code>liburing</code>).</p>
+<p>Since version 5.1 of the kernel, a newer asynchronous model for I/O is available: <code>io_uring</code>.</p>
+<p>The core idea relies on two ring buffers shared between user space and the kernel:</p>
+<pre><code class="language-txt"> user space                         kernel
+ ┌──────────────────────┐
+ │ Submission Queue (SQ)│ ──────▶  picks up SQEs, does the I/O
+ │  [sqe][sqe][sqe]...  │
+ └──────────────────────┘
+ ┌──────────────────────┐
+ │ Completion Queue (CQ)│ ◀──────  writes a CQE when each op finishes
+ │  [cqe][cqe]...       │
+ └──────────────────────┘
+</code></pre>
+<p>User space adds a <strong>Submission Queue Entry (SQE)</strong> to the SQ, and is notified of its result through a <strong>Completion Queue Entry (CQE)</strong> in the CQ.</p>
+<p>An SQE reads like "read FD X into buffer Y, length N, offset Z". Adding one is not a syscall: the request is just written into the shared buffer. A CQE holds what the equivalent syscall would have returned (e.g. the number of bytes read).</p>
+<p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/05-asynchronous-io/main.c">example</a>. Here, the important lines are:</p>
+<pre><code class="language-c">#include &lt;liburing.h&gt; // the library used for io_uring.
+
+int ret = io_uring_queue_init(8, &amp;ring, 0); // set up the ring with 8 entries in the submission queue.
+
+// get a free entry in the submission queue so that we can fill in the request
+struct io_uring_sqe *sqe;
+sqe = io_uring_get_sqe(&amp;ring);
+// prepare the request - which fd, where to save it, what offset.
+io_uring_prep_read(sqe, file_fd, file_req.buf, sizeof file_req.buf, 0); // offset 0
+// attach our own pointer, which comes back in the CQE
+io_uring_sqe_set_data(sqe, &amp;file_req);
+
+// we can queue multiple requests at once (up to the 8 entries from initialisation).
+// In the example, we queue one for stdin and one for a file.
+
+// submit everything in one go
+io_uring_submit(&amp;ring);
+
+// do work, collect results as they arrive
+int done = 0;
+long work = 0;
+while (done &lt; 2) {
+    struct io_uring_cqe *cqe;
+    while (io_uring_peek_cqe(&amp;ring, &amp;cqe) == 0) {
+        // ...
+
+        printf(&quot;%s done after %ld units of work: %d bytes: %.*s\n&quot;,
+               r-&gt;name, work, cqe-&gt;res, cqe-&gt;res, r-&gt;buf);
+
+        // ...
+        io_uring_cqe_seen(&amp;ring, cqe); // mark the completion as consumed
+        done++;
+    }
+    usleep(100000); // stand-in for real work
+}
+// tear down the ring.
+io_uring_queue_exit(&amp;ring);
+close(file_fd);
+</code></pre>
+<p>Here we:</p>
+<ol>
+<li>Prepare and submit multiple I/O requests to the SQ.</li>
+<li>Do busy work whilst the kernel does the I/O.</li>
+<li>Consume the results from the CQ.</li>
+</ol>
+<p>By default, the CQ has twice as many entries as the SQ (you'll see <code>cq_entries=16</code> below).</p>
+<pre><code class="language-sh"># add the liburing library if not there
+sudo apt install liburing-dev -y
+# compile
+gcc -O0 main.c -g -o main -luring
+# inspect
+(sleep 3; echo hi) | strace -T -e trace=io_uring_setup,io_uring_enter,mmap,read ./main
+
+# ...
+## setting up io_uring
+# io_uring_setup(8, {flags=0, sq_thread_cpu=0, sq_thread_idle=0, sq_entries=8, cq_entries=16, features=IORING_FEAT_SINGLE_MMAP|IORING_FEAT_NODROP|...}) = 3 &lt;0.000110&gt;
+
+## mapping the rings into shared memory
+# mmap(NULL, 352, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, 3, 0) = 0xfdfbb2347000 &lt;0.000046&gt;
+# mmap(NULL, 512, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, 3, 0x10000000) = 0xfdfbb2346000 &lt;0.000044&gt;
+## submit both requests in a single syscall
+# io_uring_enter(3, 2, 0, 0, NULL, 8)     = 2 &lt;0.000150&gt;
+# file done after 1 units of work: 6 bytes: foobar
+## 3 seconds of work, no syscalls
+# pipe done after 29 units of work: 3 bytes: hi
+</code></pre>
+<p>Notice what's missing: there is no <code>read()</code> on the pipe at all. A single <code>io_uring_enter</code> submits both requests, and then the results just... appear.</p>
+<p>How does this work without a syscall to fetch the data?</p>
+<p><code>io_uring</code> uses <code>mmap</code>, which creates a new mapping in the virtual address space of the process. Here, the two <code>mmap</code> calls on FD 3 (the ring) map the SQ and CQ into memory that <strong>both</strong> the process and the kernel can see. Once mapped, the process reads CQEs straight from memory, no syscall required.</p>
+<p>(A note on <code>mmap</code>: the first touch of a page causes a page fault in the kernel, but once the page is in memory, there are no more syscalls. <code>MAP_POPULATE</code> above pre-faults the pages so even that is avoided.)</p>
+<p>So why would you not use <code>io_uring</code>?</p>
+<ul>
+<li><strong>Portability</strong>: it's Linux only. On macOS the closest equivalent is <code>kqueue</code>, so you'd need per-platform code.</li>
+<li><strong>Security</strong>: <code>io_uring</code> is a big new kernel surface, and privilege-escalation bugs in it are still found regularly. Google, for instance, has disabled it on Android and ChromeOS.</li>
+</ul>
+<p>So when should you use <code>io_uring</code>? When I/O volume is very high, and syscall/thread overheads are a real bottleneck.</p>
+<hr />
+<h2 id="so-what-does-my-higher-level-language-use">So what does my higher level language use?</h2>
+<p>You'll rarely write any of the above by hand. Here's what the common languages/frameworks do for you:</p>
+<table>
+<thead>
+<tr>
+<th>Language / framework</th>
+<th>1. Blocking</th>
+<th>2. Non-blocking</th>
+<th>3. Multiplexing</th>
+<th>4. Signal-driven</th>
+<th>5. Asynchronous (<code>io_uring</code>)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Python</strong> (plain <code>socket</code>, <code>open</code>)</td>
+<td>default for sockets &amp; files</td>
+<td>opt-in: <code>sock.setblocking(False)</code></td>
+<td>opt-in: <code>selectors</code> / <code>select</code> module</td>
+<td>✗</td>
+<td>✗</td>
+</tr>
+<tr>
+<td><strong>Python</strong> (<code>asyncio</code>)</td>
+<td>files, via <code>asyncio.to_thread</code> (thread pool)</td>
+<td>sockets set non-blocking internally</td>
+<td>sockets: <code>selectors</code> → <code>epoll</code></td>
+<td>✗</td>
+<td>✗ (third-party only)</td>
+</tr>
+<tr>
+<td><strong>Go</strong></td>
+<td>files, the runtime moves the blocked thread aside</td>
+<td>all network fds set non-blocking internally</td>
+<td>network "netpoller" → <code>epoll</code> (goroutines <em>look</em> blocking)</td>
+<td>✗</td>
+<td>✗ (third-party only)</td>
+</tr>
+<tr>
+<td><strong>Rust</strong> (<code>std</code>)</td>
+<td>default for sockets &amp; files</td>
+<td>opt-in: <code>set_nonblocking(true)</code></td>
+<td>✗ (needs a crate)</td>
+<td>✗</td>
+<td>✗</td>
+</tr>
+<tr>
+<td><strong>Rust</strong> (Tokio)</td>
+<td><code>tokio::fs</code>, via <code>spawn_blocking</code> thread pool</td>
+<td>sockets set non-blocking internally</td>
+<td>sockets: <code>mio</code> → <code>epoll</code></td>
+<td>✗</td>
+<td>separate runtimes: <code>tokio-uring</code>, <code>glommio</code>, <code>monoio</code></td>
+</tr>
+<tr>
+<td><strong>Node.js</strong> (libuv)</td>
+<td>files, via libuv thread pool</td>
+<td>sockets set non-blocking internally</td>
+<td>sockets: <code>epoll</code></td>
+<td>✗</td>
+<td>✗ by default</td>
+</tr>
+<tr>
+<td><strong>Java</strong></td>
+<td>classic <code>java.io</code></td>
+<td>NIO channels</td>
+<td>NIO <code>Selector</code> → <code>epoll</code> (virtual threads build on it)</td>
+<td>✗</td>
+<td>Netty io_uring transport</td>
+</tr>
+<tr>
+<td><strong>nginx / Redis</strong></td>
+<td>✗</td>
+<td>sockets</td>
+<td><code>epoll</code> event loop</td>
+<td>✗</td>
+<td>✗</td>
+</tr>
+</tbody>
+</table>
+<p>Takeaways:</p>
+<ul>
+<li>On Linux, almost everything runs <strong>non-blocking sockets + <code>epoll</code></strong> for the network, and a <strong>thread pool of blocking calls</strong> for files (<code>epoll</code> can't help with regular files: they always report "ready").</li>
+<li>Signal-driven I/O is essentially unused by runtimes.</li>
+<li><code>io_uring</code> is completion-based (the kernel owns your buffer until the CQE arrives), which doesn't fit APIs designed around readiness (<code>epoll</code>). Hence it lives in separate, opt-in libraries.</li>
+</ul>
+<hr />
+<h2 id="closing-remarks">Closing remarks</h2>
+<p>All five models answer the same question: <strong>what does my process do while the data isn't there yet?</strong></p>
+<ol>
+<li><strong>Blocking:</strong> sleep inside <code>read()</code>.</li>
+<li><strong>Non-blocking:</strong> keep asking (<code>EAGAIN</code>, <code>EAGAIN</code>, <code>EAGAIN</code>...), burning CPU.</li>
+<li><strong>Multiplexing:</strong> sleep in one place (<code>poll</code>/<code>epoll</code>) on behalf of <em>many</em> FDs, then <code>read()</code> the ready ones.</li>
+<li><strong>Signal-driven:</strong> get on with other work, let the kernel interrupt you with <code>SIGIO</code>, then <code>read()</code>.</li>
+<li><strong>Asynchronous:</strong> hand the whole <code>read()</code> to the kernel, and pick up the result from shared memory.</li>
+</ol>
+<p>Each step moves a bit more of the work from the process to the kernel. Models 1-4 tell you when you <strong>can</strong> read (readiness). Only <code>io_uring</code> tells you the read <strong>has happened</strong> (completion).</p>
+<p><code>strace</code> made the difference visible every time: the 3-second wait moved from a blocking <code>read(0, ...) &lt;2.99&gt;</code>, to a stream of <code>EAGAIN</code> retries, to a single <code>ppoll</code>, to a <code>SIGIO</code>, and finally to no <code>read()</code> at all.</p>
+<p>Python's <code>asyncio</code>, Go's goroutines, Tokio and Node all wrap model 3 (<code>epoll</code>) plus a thread pool for files, and <code>io_uring</code> stays an opt-in for disk-heavy software like databases. Knowing what sits underneath still pays off: when something hangs, spins at 100% CPU, or just seems slow, <code>strace -T</code> will usually show you which of these five models you're really running.</p>
+<hr>
+<p><a href="/posts/06-ml-math/">Maths behind ML and AI</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>
