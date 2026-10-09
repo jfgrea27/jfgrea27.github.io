@@ -1,0 +1,7 @@
+---
+title: "Posts"
+---
+
+# Posts
+
+{{ posts }}

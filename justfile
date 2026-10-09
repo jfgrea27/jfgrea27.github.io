@@ -1,3 +1,5 @@
-serve:
-    (cd jfgrea27.github.io && hugo server)
+build:
+    uv run build.py
 
+serve: build
+    python3 -m http.server 8000 -d site

@@ -1,0 +1,7 @@
+/* images, videos, diagrams and tables: centred, at most 600px, never wider than the screen */
+img, video { display: block; margin: 1em auto; max-width: min(100%, 600px); height: auto; }
+video { width: 600px; }
+pre.mermaid { text-align: center; }
+table { display: block; overflow-x: auto; width: fit-content; max-width: 100%; margin: 1em auto; }
+pre { overflow-x: auto; }
+mjx-container[display="true"] { overflow-x: auto; overflow-y: hidden; }
