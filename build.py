@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["markdown==3.7", "pymdown-extensions==10.12"]
+# dependencies = ["markdown==3.7", "pymdown-extensions==10.12", "pygments==2.18.0"]
 # ///
 """Turn every site/**/index.md into index.html next to it, using template.html."""
 import html
@@ -55,8 +55,13 @@ def render(md):
     md = re.sub(r"\]\(([\w-]+)\.md\)", r"](../\1/)", md)
     out = markdown.markdown(
         md,
-        extensions=["fenced_code", "tables", "sane_lists", "toc", "pymdownx.arithmatex"],
-        extension_configs={"pymdownx.arithmatex": {"generic": True}, "toc": {"slugify": slugify}},
+        extensions=["pymdownx.superfences", "pymdownx.highlight", "tables", "sane_lists", "toc", "pymdownx.arithmatex"],
+        extension_configs={
+            "pymdownx.arithmatex": {"generic": True},
+            "toc": {"slugify": slugify},
+            # syntax colours at build time; label each block with its language, except plain text
+            "pymdownx.highlight": {"guess_lang": False, "auto_title": True, "auto_title_map": {"Text Only": ""}},
+        },
     )
     return out, mermaid
 
