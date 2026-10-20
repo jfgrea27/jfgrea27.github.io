@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code: Lessons from the Trenches</title>
 <link rel="icon" href="/favicon/favicon.ico">
-<link rel="stylesheet" href="/style.css?v=3">
+<link rel="stylesheet" href="/style.css?v=5">
 
 </head>
 <body>
@@ -32,15 +32,15 @@
 <hr />
 <h2 id="00---basic-usage">00 - Basic Usage</h2>
 <p>The simplest way to use Claude Code is just prompting it directly:</p>
-<pre><code class="language-sh">claude
-</code></pre>
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code>claude
+</code></pre></div>
 <p>Then provide your request:</p>
-<pre><code class="language-txt">Add more logging to books_api
+<div class="highlight"><pre><span></span><code>Add more logging to books_api
 - info for starting/ending of requests.
 - debug for any db interaction
-</code></pre>
+</code></pre></div>
 <p>Claude Code explores the codebase, understands the structure, and makes the changes. The output confirms what was done:</p>
-<pre><code>Done. I've added logging to the books_api:
+<div class="highlight"><pre><span></span><code>Done. I&#39;ve added logging to the books_api:
 
   Info logging for requests (routes.py):
   - All endpoints now log &quot;request started&quot; at the beginning
@@ -50,40 +50,40 @@
   - get_all_books: logs query start and number of books retrieved
   - get_book_by_id: logs query and whether book was found
   - create_book: logs the data being created and the resulting book id
-</code></pre>
+</code></pre></div>
 <h3 id="lesson-learned">Lesson Learned</h3>
 <p><strong>Without configuration, Claude Code completes the task but skips quality checks.</strong> The formatting was off and it didn't run tests. The feature works, but you're left manually verifying everything passed. This leads us to exercise 01.</p>
 <hr />
 <h2 id="01---claudemd">01 - CLAUDE.md</h2>
 <p>Claude Code reads <code>CLAUDE.md</code> files to understand project context, tools, and workflows. From the <a href="https://www.anthropic.com/engineering/claude-code-best-practices">best practices guide</a>, this file tells Claude what commands to run and when.</p>
 <p>Here's a minimal example:</p>
-<pre><code class="language-md"># books-api
+<div class="highlight"><span class="filename">Markdown</span><pre><span></span><code><span class="gh"># books-api</span>
 
-- Run `just typecheck` after making changes
-- Run `just fmt` to format code
-- These can be run without asking permission
-</code></pre>
+<span class="k">-</span><span class="w"> </span>Run <span class="sb">`just typecheck`</span> after making changes
+<span class="k">-</span><span class="w"> </span>Run <span class="sb">`just fmt`</span> to format code
+<span class="k">-</span><span class="w"> </span>These can be run without asking permission
+</code></pre></div>
 <p>Running the same logging task now produces:</p>
-<pre><code>I can see the logger is already set up. I'll add the logging statements.
+<div class="highlight"><pre><span></span><code>I can see the logger is already set up. I&#39;ll add the logging statements.
 ...
-Now I'll run typecheck and format as per the project instructions.
+Now I&#39;ll run typecheck and format as per the project instructions.
 ...
 Bash(just typecheck)
 Bash(just fmt)
 ...
 Done. Typecheck passed and code was formatted.
-</code></pre>
+</code></pre></div>
 <h3 id="lesson-learned_1">Lesson Learned</h3>
 <p><strong>CLAUDE.md turns Claude Code from a code writer into a workflow executor.</strong> It automatically runs your linting, formatting, and type checking. Keep the file succinct though - it's part of the context window, and verbose instructions consume tokens you'll need for actual work.</p>
 <hr />
 <h2 id="02---plan-mode">02 - Plan Mode</h2>
 <p>For larger changes, ask Claude Code to create a plan before implementing:</p>
-<pre><code class="language-txt">Add a PATCH books endpoint.
+<div class="highlight"><pre><span></span><code>Add a PATCH books endpoint.
 Update the README.md, .http file, tests and src
 Create a plan for the changes above and ask me to approve it before making the changes.
-</code></pre>
+</code></pre></div>
 <p>Claude enters plan mode and outputs a structured proposal:</p>
-<pre><code>PATCH /books/{book_id} Implementation Plan
+<div class="highlight"><pre><span></span><code>PATCH /books/{book_id} Implementation Plan
 
 Files to modify (6 total):
 ┌─────────────────┬─────────────────────────────────────────────────────────────┐
@@ -101,23 +101,23 @@ Key details:
 - Uses existing update_book() function from db layer
 - Returns 404 if book not found
 - Returns the updated book as BookResponse
-</code></pre>
+</code></pre></div>
 <p>After approval, Claude executes the plan and verifies: 49 tests passed, typecheck passed, code formatted.</p>
 <h3 id="lesson-learned_2">Lesson Learned</h3>
 <p><strong>Plans serve two purposes: alignment and context management.</strong> First, you review the approach before Claude writes code. Second, if your session runs out of context, you can start fresh and paste the plan as a reference. This is especially useful for features touching many files.</p>
 <hr />
 <h2 id="03---subagents">03 - Subagents</h2>
 <p>Subagents are specialized AI agents for task-specific workflows. Create one with <code>/agent</code>:</p>
-<pre><code class="language-sh">/agent
-</code></pre>
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code>/agent
+</code></pre></div>
 <p>Define its purpose:</p>
-<pre><code class="language-txt">You are an expert bug fixer that uses TDD approach: write test, fix bug, see test pass.
-</code></pre>
+<div class="highlight"><pre><span></span><code>You are an expert bug fixer that uses TDD approach: write test, fix bug, see test pass.
+</code></pre></div>
 <p>Claude saves this as a markdown file (e.g., <code>.claude/agents/bug-fixer-tdd.md</code>). When you report a bug:</p>
-<pre><code class="language-txt">There is a bug in the code, I see two times the same book title in the database.
-</code></pre>
+<div class="highlight"><pre><span></span><code>There is a bug in the code, I see two times the same book title in the database.
+</code></pre></div>
 <p>Claude Code recognizes the bug-fixer agent is relevant and invokes it:</p>
-<pre><code>I'll use the bug-fixer-tdd agent to investigate and fix the duplicate books issue.
+<div class="highlight"><pre><span></span><code>I&#39;ll use the bug-fixer-tdd agent to investigate and fix the duplicate books issue.
 ...
 bug-fixer-tdd(Fix duplicate books bug)
 ...
@@ -132,14 +132,14 @@ The bug has been fixed:
   that attempting to create a duplicate book now raises IntegrityError.
 
   All 50 tests pass, typecheck passes, and formatting is correct.
-</code></pre>
+</code></pre></div>
 <h3 id="lesson-learned_3">Lesson Learned</h3>
 <p><strong>Subagents create a fresh context for specialized workflows.</strong> The TDD agent follows a specific pattern: understand bug → write failing test → implement fix → see test pass. This is different from skills (exercise 04) which provide knowledge without creating new context. Use subagents when the workflow itself is specialized.</p>
 <hr />
 <h2 id="04---skills">04 - Skills</h2>
 <p>Skills provide domain knowledge that loads only when relevant. Unlike subagents, they don't create a new context - they inject knowledge into the current session.</p>
 <p>Create a skill at <code>.claude/skills/project-structure.md</code>:</p>
-<pre><code class="language-md"># Project Structure
+<div class="highlight"><span class="filename">Markdown</span><pre><span></span><code><span class="gh"># Project Structure</span>
 
 When creating new REST resources, follow this structure:
 
@@ -150,13 +150,13 @@ When creating new REST resources, follow this structure:
 ./db/MODEL.py # Database operations
 
 Mirror this structure in the test directory.
-</code></pre>
+</code></pre></div>
 <p>Now when you ask:</p>
-<pre><code class="language-txt">Can you create the CRUD operations for users, borrowings.
+<div class="highlight"><pre><span></span><code>Can you create the CRUD operations for users, borrowings.
 Users can borrow books.
-</code></pre>
+</code></pre></div>
 <p>Claude reads the skill and creates both resources following your established patterns:</p>
-<pre><code>Users (/users)
+<div class="highlight"><pre><span></span><code>Users (/users)
 - Model: models/users.py - User with id, name, email fields
 - DB operations: db/users.py - CRUD functions
 - HTTP endpoints: GET, POST, PATCH, DELETE
@@ -167,7 +167,7 @@ Borrowings (/borrowings)
 - HTTP endpoints: full CRUD + POST /borrowings/{id}/return
 
 Tests created following existing patterns. Typecheck and formatting passed.
-</code></pre>
+</code></pre></div>
 <h3 id="lesson-learned_4">Lesson Learned</h3>
 <p><strong>Skills are lightweight knowledge injection; subagents are heavy workflow delegation.</strong> Use skills when you want Claude to follow patterns consistently. Use subagents when the task requires a completely different approach (like TDD). Skills stay in your current context window; subagents spawn a fresh one.</p>
 <hr />
@@ -180,22 +180,22 @@ Tests created following existing patterns. Typecheck and formatting passed.
 <li><code>search_books</code> - Search books by title or author</li>
 </ul>
 <p>Configure it in <code>.mcp.json</code>:</p>
-<pre><code class="language-json">{
-  &quot;mcpServers&quot;: {
-    &quot;books&quot;: {
-      &quot;type&quot;: &quot;sse&quot;,
-      &quot;url&quot;: &quot;http://localhost:8080/sse&quot;
-    }
-  }
-}
-</code></pre>
+<div class="highlight"><span class="filename">JSON</span><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;mcpServers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;books&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;sse&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;url&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;http://localhost:8080/sse&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
 <p>Start the MCP server (<code>just mcp</code>), then restart Claude Code. Now you can query:</p>
-<pre><code class="language-txt">What books are available in the books-mcp?
+<div class="highlight"><pre><span></span><code>What books are available in the books-mcp?
 Can you add them to our books-api?
 Can you then use the api to list the books?
-</code></pre>
+</code></pre></div>
 <p>Claude discovers and uses the MCP tools:</p>
-<pre><code>I found 5 books in the books-mcp:
+<div class="highlight"><pre><span></span><code>I found 5 books in the books-mcp:
 ┌───────────────────────────────────┬────────────────────────┬──────┐
 │             Title                 │         Author         │ Year │
 ├───────────────────────────────────┼────────────────────────┼──────┤
@@ -210,7 +210,7 @@ Done. I:
 1. Queried the books-mcp using the MCP tool and found 5 books
 2. Added all 5 books to the books-api via POST requests
 3. Listed the books from the API - all 5 books are now available
-</code></pre>
+</code></pre></div>
 <h3 id="lesson-learned_5">Lesson Learned</h3>
 <p><strong>MCPs turn Claude Code into a universal integration layer.</strong> Instead of manually querying systems and copy-pasting data, Claude can interact with external tools directly. The MCP provides both context (data to read) and actions (operations to perform).</p>
 <hr />
@@ -222,35 +222,35 @@ Done. I:
 <li>DEV-6: Update REST endpoints for books to include book_type</li>
 </ul>
 <p>Prompt Claude:</p>
-<pre><code class="language-txt">Can you implement ticket DEV-4.
+<div class="highlight"><pre><span></span><code>Can you implement ticket DEV-4.
 - Create a branch dev-4
 - For each task in the epic:
   - Create a commit with implementation
-</code></pre>
+</code></pre></div>
 <p>Claude fetches the epic from Jira, creates a plan, and executes:</p>
-<pre><code>I found the epic. DEV-4: Add book type requires:
+<div class="highlight"><pre><span></span><code>I found the epic. DEV-4: Add book type requires:
 - Adding a book type field (fiction, non_fiction, unknown)
 - Maintaining 80% code coverage
 
 Found 2 tasks:
 1. DEV-5: Update db schema (use enums)
 2. DEV-6: Update REST endpoints (default to unknown)
-</code></pre>
+</code></pre></div>
 <p>The resulting git log:</p>
-<pre><code>commit f5902a4 (HEAD -&gt; dev-4)
+<div class="highlight"><pre><span></span><code>commit f5902a4 (HEAD -&gt; dev-4)
     DEV-6: Update REST endpoints for books to include book_type
     Co-Authored-By: Claude Opus 4.5 &lt;noreply@anthropic.com&gt;
 
 commit 8e60b64
     DEV-5: Update db schema of books to include book_type
     Co-Authored-By: Claude Opus 4.5 &lt;noreply@anthropic.com&gt;
-</code></pre>
+</code></pre></div>
 <h3 id="lesson-learned_6">Lesson Learned</h3>
 <p><strong>Third-party MCPs close the loop between ticket and implementation.</strong> Claude reads the requirements from Jira, plans the implementation, creates appropriately-scoped commits, and references the ticket IDs. For larger epics, consider using subagents per task to keep each context focused.</p>
 <hr />
 <h2 id="07---context-management">07 - Context Management</h2>
 <p>Long sessions consume context. Use <code>/context</code> to inspect:</p>
-<pre><code>Context Usage
+<div class="highlight"><pre><span></span><code>Context Usage
 claude-opus-4-5-20251101 · 27k/200k tokens (13%)
 
 ⛁ System prompt:    3.0k tokens (1.5%)
@@ -261,7 +261,7 @@ claude-opus-4-5-20251101 · 27k/200k tokens (13%)
 ⛁ Messages:         5.2k tokens (2.6%)
 ⛶ Free space:       128k (64.1%)
 ⛝ Autocompact:     45.0k tokens (22.5%)
-</code></pre>
+</code></pre></div>
 <p>Key components:</p>
 <table>
 <thead>

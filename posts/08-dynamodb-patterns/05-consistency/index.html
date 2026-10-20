@@ -1,0 +1,1016 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 - Consistency &amp; concurrency</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>05 - Consistency &amp; concurrency</h1>
+<p><small>2026-10-20</small></p>
+<p>This part is about staying correct when many clients write at once. DynamoDB has no locks in the usual sense. Instead, every write can carry a <strong>condition</strong> that DynamoDB checks atomically on the server, and every pattern on this page is built from that one primitive (plus transactions for the multi-item cases).</p>
+<p>The ideas build on each other. <strong>Conditional writes</strong> reject a write unless the item is in the state we expect: it doesn't exist yet, a field has a given value, or there's enough balance left. <strong>Optimistic locking</strong> is just a conditional write on a <code>version</code> number: we read, change, and write only if the version hasn't moved, retrying if it has. <strong>Atomic updates</strong> (<code>ADD</code>, <code>SET x = x + :n</code>) change a value on the server, so there's no read-modify-write race at all. <strong>Transactions</strong> make up to 100 writes all-or-nothing, and they're also how we enforce uniqueness on a non-key attribute, by writing a sentinel item in the same transaction. <strong>Idempotency keys</strong> make retries safe: we record the request ID with a condition, so the second attempt gets the stored result back.</p>
+<p>Two warnings round it off. <strong>GSIs lag behind the table</strong>, so we should never use a GSI read to decide whether a write is safe. And <strong>distributed locks</strong> are conditional writes with a lease, kept for the rare cases that genuinely need mutual exclusion.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>What we'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>22</td>
+<td><a href="#22--conditional-writes">Conditional writes</a></td>
+<td>Create-only, update-if-exists, business-rule conditions</td>
+</tr>
+<tr>
+<td>23</td>
+<td><a href="#23--optimistic-locking">Optimistic locking</a></td>
+<td>Version checks and a retry loop</td>
+</tr>
+<tr>
+<td>24</td>
+<td><a href="#24--atomic-counters">Atomic counters</a></td>
+<td><code>ADD</code> vs read-then-write under concurrency; floors and sequences</td>
+</tr>
+<tr>
+<td>25</td>
+<td><a href="#25--transactions">Transactions</a></td>
+<td><code>TransactWriteItems</code>, cancellation reasons, <code>TransactGetItems</code></td>
+</tr>
+<tr>
+<td>26</td>
+<td><a href="#26--unique-constraints-on-non-key-attributes">Unique constraints on non-key attributes</a></td>
+<td>Sentinel items for unique emails; changing a unique value</td>
+</tr>
+<tr>
+<td>27</td>
+<td><a href="#27--idempotency-keys">Idempotency keys</a></td>
+<td>Exactly-once effects for retried requests</td>
+</tr>
+<tr>
+<td>28</td>
+<td><a href="#28--gsis-are-eventually-consistent">GSIs are eventually consistent</a></td>
+<td>Why GSI reads can be stale, and the workarounds</td>
+</tr>
+<tr>
+<td>29</td>
+<td><a href="#29--distributed-locking">Distributed locking</a></td>
+<td>Leases, heartbeats, owner-checked release, takeover</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="22--conditional-writes">22 · Conditional writes</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/22-conditional-writes/22-conditional-writes.py">22-conditional-writes.py</a> · run with <code>just run 22</code></p>
+<h3 id="problem">Problem</h3>
+<p><code>PutItem</code> replaces whatever is already there, and <code>UpdateItem</code> creates the item if it doesn't exist (an upsert). Without guards, we get accidental overwrites, "ghost" items created by updates that should have failed, and broken business rules such as negative balances or double bookings.</p>
+<h3 id="pattern">Pattern</h3>
+<p>We add a <code>ConditionExpression</code> to the write. DynamoDB checks it <strong>atomically on the server</strong>, and if it's false, the write is rejected with <code>ConditionalCheckFailedException</code>.</p>
+<p>A handful of conditions cover most needs:</p>
+<table>
+<thead>
+<tr>
+<th>Goal</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create only, no overwrite</td>
+<td><code>attribute_not_exists(PK)</code></td>
+</tr>
+<tr>
+<td>Update only if item exists</td>
+<td><code>attribute_exists(PK)</code></td>
+</tr>
+<tr>
+<td>Optimistic lock</td>
+<td><code>version = :expected</code> (<a href="#23--optimistic-locking">23</a>)</td>
+</tr>
+<tr>
+<td>Business rule</td>
+<td><code>credits &gt;= :amount AND #status = :active</code></td>
+</tr>
+<tr>
+<td>State machine transition</td>
+<td><code>#status = :from</code> (e.g. only PENDING → PAID)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice">In practice</h3>
+<p>The script runs through the first, second and fourth rows of that table against a user with 10 credits. The business-rule guard looks like this:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">spend</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">amount</span><span class="p">:</span> <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;USER#alice&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;PROFILE&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET credits = credits - :a&quot;</span><span class="p">,</span>
+    <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;credits &gt;= :a AND #s = :active&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;#s&quot;</span><span class="p">:</span> <span class="s2">&quot;status&quot;</span><span class="p">},</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:a&quot;</span><span class="p">:</span> <span class="n">amount</span><span class="p">,</span> <span class="s2">&quot;:active&quot;</span><span class="p">:</span> <span class="s2">&quot;active&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p22-conditional-writes
+    item:       {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;, name: &#39;Alice&#39;, credits: 10, status: &#39;active&#39;}
+    condition:  attribute_not_exists(PK)
+
+=== Create alice (first time) ===
+&quot;OK&quot;
+
+&gt;&gt;&gt; PutItem p22-conditional-writes
+    item:       {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;, name: &#39;Alice&#39;, credits: 10, status: &#39;active&#39;}
+    condition:  attribute_not_exists(PK)
+
+=== Create alice again (would overwrite) ===
+&quot;ConditionalCheckFailedException&quot;
+
+&gt;&gt;&gt; UpdateItem p22-conditional-writes
+    key:        {PK: &#39;USER#bob&#39;, SK: &#39;PROFILE&#39;}
+    condition:  attribute_exists(PK)
+    update:     SET name = &#39;Bob&#39;
+
+=== Update bob (doesn&#39;t exist) ===
+&quot;ConditionalCheckFailedException&quot;
+
+&gt;&gt;&gt; UpdateItem p22-conditional-writes
+    key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+    condition:  credits &gt;= 7 AND status = &#39;active&#39;
+    update:     SET credits = credits - 7
+
+=== Spend 7 credits ===
+&quot;OK&quot;
+
+&gt;&gt;&gt; UpdateItem p22-conditional-writes
+    key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+    condition:  credits &gt;= 7 AND status = &#39;active&#39;
+    update:     SET credits = credits - 7
+
+=== Spend 7 more (only 3 left) ===
+&quot;ConditionalCheckFailedException&quot;
+
+&gt;&gt;&gt; UpdateItem p22-conditional-writes
+    key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+    condition:  credits &gt;= 7
+    update:     SET credits = credits - 7
+    ReturnValuesOnConditionCheckFailure: ALL_OLD
+
+=== Item at failure time ===
+{
+  &quot;credits&quot;: 3,
+  &quot;SK&quot;: &quot;PROFILE&quot;,
+  &quot;name&quot;: &quot;Alice&quot;,
+  &quot;PK&quot;: &quot;USER#alice&quot;,
+  &quot;status&quot;: &quot;active&quot;
+}
+</code></pre></div>
+<p>The second create is refused instead of overwriting Alice. The update to Bob is refused instead of quietly creating a half-empty Bob. The second spend is refused because only 3 credits are left. The last call asks for <code>ALL_OLD</code> on failure, so the error hands back the item as it was when the condition failed (3 credits), and we don't need a second read to find out why.</p>
+<h3 id="why">Why</h3>
+<ul>
+<li>It's an atomic check-and-write with no transaction and no lock.</li>
+<li>It costs the same as a normal write.</li>
+<li>It's the building block for uniqueness (<a href="#26--unique-constraints-on-non-key-attributes">26</a>), idempotency (<a href="#27--idempotency-keys">27</a>) and locks (<a href="#29--distributed-locking">29</a>).</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<ul>
+<li>A condition can only look at the <strong>one item</strong> being written. For rules that span several items, we need <a href="#25--transactions">transactions</a> (<code>ConditionCheck</code>).</li>
+<li>A failed write still uses write capacity.</li>
+</ul>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li><code>attribute_not_exists(PK)</code> means "no item with this full key exists". It does not check the whole partition.</li>
+<li>Reserved words (<code>status</code>, <code>name</code>, <code>count</code>…) need <code>ExpressionAttributeNames</code> (<code>#s</code>).</li>
+<li>Passing <code>ReturnValuesOnConditionCheckFailure="ALL_OLD"</code> gets the current item back on failure, which saves a re-read. The item comes back in the raw <code>{"S": ...}</code> form, so we have to deserialize it ourselves (the script uses <code>TypeDeserializer</code> for this).</li>
+</ul>
+<hr />
+<h2 id="23--optimistic-locking">23 · Optimistic locking</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/23-optimistic-locking/23-optimistic-locking.py">23-optimistic-locking.py</a> · run with <code>just run 23</code></p>
+<h3 id="problem_1">Problem</h3>
+<p>Two clients read the same item, change it in memory, and write it back. The second write silently overwrites the first. This is a <strong>lost update</strong>, and DynamoDB has no row locks to stop it.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We keep a <code>version</code> number on the item. Every write says "only if the version is still what I read", and increments it:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span>
+    <span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="o">**</span><span class="n">item</span><span class="p">,</span> <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="n">v</span> <span class="o">+</span> <span class="mi">1</span><span class="p">},</span>
+    <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;version = :v&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:v&quot;</span><span class="p">:</span> <span class="n">v</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>If someone else wrote in between, the call fails with <code>ConditionalCheckFailedException</code>. The client then re-reads, re-applies its change and retries.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>balance</th>
+<th>version</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ACCOUNT#a1</code></td>
+<td><code>META</code></td>
+<td>150</td>
+<td>2</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice_1">In practice</h3>
+<p>The script starts an account at balance 100, version 1. Clients A and B both read it. A deposits 50 and wins; B tries to withdraw 30 based on its stale read. Then B uses the standard fix, a retry loop that re-reads with <code>ConsistentRead=True</code>:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">update_with_retry</span><span class="p">(</span><span class="n">change</span><span class="p">,</span> <span class="n">attempts</span><span class="o">=</span><span class="mi">3</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">attempts</span><span class="p">):</span>
+        <span class="n">current</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="n">key</span><span class="p">,</span> <span class="n">ConsistentRead</span><span class="o">=</span><span class="kc">True</span><span class="p">)[</span><span class="s2">&quot;Item&quot;</span><span class="p">]</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">save</span><span class="p">(</span><span class="n">change</span><span class="p">(</span><span class="n">current</span><span class="p">),</span> <span class="n">current</span><span class="p">[</span><span class="s2">&quot;version&quot;</span><span class="p">])</span>
+            <span class="k">return</span>
+        <span class="k">except</span> <span class="n">ClientError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">e</span><span class="o">.</span><span class="n">response</span><span class="p">[</span><span class="s2">&quot;Error&quot;</span><span class="p">][</span><span class="s2">&quot;Code&quot;</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">&quot;ConditionalCheckFailedException&quot;</span><span class="p">:</span>
+                <span class="k">raise</span>
+    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;gave up after retries&quot;</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p23-optimistic-locking
+    item:       {SK: &#39;META&#39;, PK: &#39;ACCOUNT#a1&#39;, balance: 150, version: 2}
+    condition:  version = 1
+
+&gt;&gt;&gt; GetItem p23-optimistic-locking
+    key:        {PK: &#39;ACCOUNT#a1&#39;, SK: &#39;META&#39;}
+
+=== A deposited 50 ===
+{
+  &quot;SK&quot;: &quot;META&quot;,
+  &quot;PK&quot;: &quot;ACCOUNT#a1&quot;,
+  &quot;balance&quot;: 150,
+  &quot;version&quot;: 2
+}
+
+&gt;&gt;&gt; PutItem p23-optimistic-locking
+    item:       {SK: &#39;META&#39;, PK: &#39;ACCOUNT#a1&#39;, balance: 70, version: 2}
+    condition:  version = 1
+
+=== B rejected ===
+&quot;ConditionalCheckFailedException&quot;
+
+&gt;&gt;&gt; GetItem p23-optimistic-locking
+    key:        {PK: &#39;ACCOUNT#a1&#39;, SK: &#39;META&#39;}
+    ConsistentRead: True
+
+&gt;&gt;&gt; PutItem p23-optimistic-locking
+    item:       {SK: &#39;META&#39;, PK: &#39;ACCOUNT#a1&#39;, balance: 120, version: 3}
+    condition:  version = 2
+
+...
+
+=== B retried on fresh data ===
+{
+  &quot;SK&quot;: &quot;META&quot;,
+  &quot;PK&quot;: &quot;ACCOUNT#a1&quot;,
+  &quot;balance&quot;: 120,
+  &quot;version&quot;: 3
+}
+</code></pre></div>
+<p>B's first write would have set the balance to 70, wiping out A's deposit. The <code>version = 1</code> condition catches it. On retry, B reads version 2 (balance 150), applies its withdrawal and writes 120 at version 3, which is the right answer.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li>There are no locks to hold, expire or clean up. Contention is detected at write time.</li>
+<li>It costs no more than a normal write (although a failed condition still uses write capacity).</li>
+<li>It works with <code>PutItem</code>, <code>UpdateItem</code>, <code>DeleteItem</code> and transactions.</li>
+</ul>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<ul>
+<li>Under heavy contention, clients retry a lot. In that case, use a pessimistic lock (<a href="#29--distributed-locking">29</a>) or restructure the data.</li>
+<li>For simple numeric changes, an atomic <code>ADD</code> (<a href="#24--atomic-counters">24</a>) or a guarded <code>UpdateItem</code> (<code>SET balance = balance - :x</code> with <code>balance &gt;= :x</code>) avoids the read entirely.</li>
+</ul>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li>Re-read with <code>ConsistentRead=True</code> before retrying. Otherwise we may get the stale version again.</li>
+<li>Cap the retries and add jitter.</li>
+<li>The Java SDK's DynamoDBMapper <code>@DynamoDBVersionAttribute</code> and PynamoDB's <code>VersionAttribute</code> do all of this for us.</li>
+<li>Related: <a href="#22--conditional-writes">conditional writes</a>.</li>
+</ul>
+<hr />
+<h2 id="24--atomic-counters">24 · Atomic counters</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/24-atomic-counters/24-atomic-counters.py">24-atomic-counters.py</a> · run with <code>just run 24</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>Page views, likes, stock levels and sequence numbers all need increments. If we read the value, add one in code and write it back, we lose updates whenever two clients do it at the same time.</p>
+<h3 id="pattern_2">Pattern</h3>
+<p>We let DynamoDB do the arithmetic with <code>UpdateItem</code>:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST#hello-world&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;STATS&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;ADD #v :one&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;#v&quot;</span><span class="p">:</span> <span class="s2">&quot;views&quot;</span><span class="p">},</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:one&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">},</span>
+    <span class="n">ReturnValues</span><span class="o">=</span><span class="s2">&quot;UPDATED_NEW&quot;</span><span class="p">,</span>  <span class="c1"># optional: get the new value back</span>
+<span class="p">)</span>
+</code></pre></div>
+<ul>
+<li><code>ADD</code> (or <code>SET x = if_not_exists(x, :zero) + :one</code>) is applied atomically on the server.</li>
+<li>Adding a <code>ConditionExpression</code> gives us a <strong>bounded counter</strong>, e.g. <code>remaining &gt; :zero</code> so tickets never oversell.</li>
+<li><code>ReturnValues="UPDATED_NEW"</code> turns a counter into a <strong>sequence generator</strong>, for things like invoice numbers.</li>
+</ul>
+<h3 id="in-practice_2">In practice</h3>
+<p>The script fires 50 increments from 10 threads twice: once with <code>ADD</code>, and once with the racy read-then-put approach:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">racy_increment</span><span class="p">(</span><span class="n">_</span><span class="p">):</span>
+    <span class="n">current</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="n">KEY</span><span class="p">)[</span><span class="s2">&quot;Item&quot;</span><span class="p">][</span><span class="s2">&quot;views&quot;</span><span class="p">]</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="o">**</span><span class="n">KEY</span><span class="p">,</span> <span class="s2">&quot;views&quot;</span><span class="p">:</span> <span class="n">current</span> <span class="o">+</span> <span class="mi">1</span><span class="p">})</span>
+</code></pre></div>
+<p>The full output is 344 lines, almost all of it the racy loop's interleaved <code>GetItem</code>/<code>PutItem</code> pairs. Here are the interesting parts:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; UpdateItem p24-atomic-counters
+    key:        {PK: &#39;POST#hello-world&#39;, SK: &#39;STATS&#39;}
+    update:     ADD views 1
+    ... (+47 more UpdateItem calls not shown)
+
+=== After 50 concurrent increments ===
+{
+  &quot;SK&quot;: &quot;STATS&quot;,
+  &quot;views&quot;: 50,
+  &quot;PK&quot;: &quot;POST#hello-world&quot;
+}
+
+&gt;&gt;&gt; PutItem p24-atomic-counters
+    item:       {PK: &#39;POST#hello-world&#39;, SK: &#39;STATS&#39;, views: 1}
+
+&gt;&gt;&gt; PutItem p24-atomic-counters
+    item:       {PK: &#39;POST#hello-world&#39;, SK: &#39;STATS&#39;, views: 1}
+...
+&gt;&gt;&gt; PutItem p24-atomic-counters
+    item:       {PK: &#39;POST#hello-world&#39;, SK: &#39;STATS&#39;, views: 6}
+
+&gt;&gt;&gt; PutItem p24-atomic-counters
+    item:       {PK: &#39;POST#hello-world&#39;, SK: &#39;STATS&#39;, views: 6}
+
+=== Racy read-modify-write after 50 &#39;increments&#39; (expect &lt; 50) ===
+{
+  &quot;SK&quot;: &quot;STATS&quot;,
+  &quot;views&quot;: 6,
+  &quot;PK&quot;: &quot;POST#hello-world&quot;
+}
+
+&gt;&gt;&gt; UpdateItem p24-atomic-counters
+    key:        {PK: &#39;SEQUENCE#invoice&#39;, SK: &#39;COUNTER&#39;}
+    update:     ADD next 1
+    ReturnValues: UPDATED_NEW
+
+=== Next invoice number ===
+{
+  &quot;next&quot;: 1
+}
+
+&gt;&gt;&gt; UpdateItem p24-atomic-counters
+    key:        {PK: &#39;TICKETS#gig&#39;, SK: &#39;COUNTER&#39;}
+    condition:  remaining &gt; 0
+    update:     ADD remaining -1
+
+=== Ticket sale 1: sold ===
+
+&gt;&gt;&gt; UpdateItem p24-atomic-counters
+    key:        {PK: &#39;TICKETS#gig&#39;, SK: &#39;COUNTER&#39;}
+    condition:  remaining &gt; 0
+    update:     ADD remaining -1
+
+=== Ticket sale 2: sold out ===
+</code></pre></div>
+<p><code>ADD</code> lands on exactly 50. The read-modify-write version ends on <strong>6</strong>: threads kept reading the same value and writing the same "+1" over each other (note the repeated <code>views: 1</code> and <code>views: 6</code> puts), so 44 increments were lost. The exact number will differ on every run, but it will almost always be well below 50. The last two blocks show <code>UPDATED_NEW</code> handing out an invoice number, and the <code>remaining &gt; 0</code> condition refusing to sell a second ticket when only one was left.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li><strong>No lost updates.</strong> No read is needed, so there's no race.</li>
+<li><strong>One round trip.</strong> There's no optimistic-lock retry loop (<a href="#23--optimistic-locking">23</a>).</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li><strong>Not idempotent.</strong> If the request times out and we retry it, we may count twice. That's fine for view counts but not for money. When exact counts matter, use <a href="#27--idempotency-keys">idempotency keys</a> or a <a href="#25--transactions">transaction</a> with a <code>ClientRequestToken</code>.</li>
+<li><strong>Hot keys.</strong> A single counter item is limited to about 1,000 WCU/s. For very high write rates, shard the counter (<a href="../07-performance-and-scale/#35--write-sharding">write sharding</a>) or aggregate from a stream (<a href="../06-lifecycle-and-events/#32--streams-maintained-aggregates">streams-maintained aggregates</a>).</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>Many common names are reserved words (<code>views</code>, <code>count</code>, <code>name</code>, <code>status</code>, <code>total</code>, <code>next</code>...). Use <code>ExpressionAttributeNames</code>.</li>
+<li><code>ADD</code> on a missing attribute starts at 0. <code>SET x = x + :n</code> fails on a missing attribute unless we wrap it in <code>if_not_exists</code>.</li>
+<li>Numbers come back as <code>Decimal</code> in boto3.</li>
+</ul>
+<hr />
+<h2 id="25--transactions">25 · Transactions</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/25-transactions/25-transactions.py">25-transactions.py</a> · run with <code>just run 25</code></p>
+<h3 id="problem_3">Problem</h3>
+<p>Placing an order touches three items: we create the order, decrement the stock and bump the customer's order count. If one write succeeds and another fails, the data is left inconsistent: an order without stock taken, or stock taken without an order.</p>
+<h3 id="pattern_3">Pattern</h3>
+<p>We use <code>TransactWriteItems</code> for all-or-nothing writes. Each action can have its own <code>ConditionExpression</code>, and if any condition fails, nothing is written.</p>
+<table>
+<thead>
+<tr>
+<th>Action</th>
+<th>Key</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Put</td>
+<td><code>USER#alice</code> / <code>ORDER#o1</code></td>
+<td><code>attribute_not_exists(PK)</code></td>
+</tr>
+<tr>
+<td>Update</td>
+<td><code>PRODUCT#widget</code> / <code>STOCK</code></td>
+<td><code>stock &gt;= :qty</code></td>
+</tr>
+<tr>
+<td>Update</td>
+<td><code>USER#alice</code> / <code>PROFILE</code></td>
+<td>none</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>When a transaction fails, the error includes <code>CancellationReasons</code>, one per action, so we can see which condition failed.</li>
+<li><code>ClientRequestToken</code> makes the call idempotent for 10 minutes. A retry with the same token doesn't apply the writes twice.</li>
+<li><code>TransactGetItems</code> reads up to 100 items as one consistent snapshot.</li>
+</ul>
+<h3 id="in-practice_3">In practice</h3>
+<p>The script starts with 3 widgets in stock and <code>orderCount: 0</code>, then places an order for 2 (fine) and an order for 5 (not enough stock):</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">transact_write_items</span><span class="p">(</span>
+    <span class="n">TransactItems</span><span class="o">=</span><span class="p">[</span>
+        <span class="p">{</span><span class="s2">&quot;Put&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">...</span><span class="p">,</span> <span class="s2">&quot;Item&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;USER#alice&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;qty&quot;</span><span class="p">:</span> <span class="n">qty</span><span class="p">},</span>
+                 <span class="s2">&quot;ConditionExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;attribute_not_exists(PK)&quot;</span><span class="p">}},</span>
+        <span class="p">{</span><span class="s2">&quot;Update&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">...</span><span class="p">,</span> <span class="s2">&quot;Key&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#widget&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;STOCK&quot;</span><span class="p">},</span>
+                    <span class="s2">&quot;UpdateExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;SET stock = stock - :q&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;ConditionExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;stock &gt;= :q&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">}},</span>
+        <span class="p">{</span><span class="s2">&quot;Update&quot;</span><span class="p">:</span> <span class="p">{</span><span class="o">...</span><span class="p">,</span> <span class="s2">&quot;Key&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;USER#alice&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;PROFILE&quot;</span><span class="p">},</span>
+                    <span class="s2">&quot;UpdateExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;ADD orderCount :one&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">}},</span>
+    <span class="p">],</span>
+    <span class="c1"># Same token within 10 minutes = same transaction, so retries are safe.</span>
+    <span class="n">ClientRequestToken</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;place-order-</span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; TransactWriteItems
+    - Put p25-transactions
+        item:       {PK: &#39;USER#alice&#39;, SK: &#39;ORDER#o1&#39;, qty: 2}
+        condition:  attribute_not_exists(PK)
+    - Update p25-transactions
+        key:        {PK: &#39;PRODUCT#widget&#39;, SK: &#39;STOCK&#39;}
+        condition:  stock &gt;= 2
+        update:     SET stock = stock - 2
+    - Update p25-transactions
+        key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+        update:     ADD orderCount 1
+
+=== Order o1 (qty 2) succeeded ===
+
+&gt;&gt;&gt; TransactWriteItems
+    - Put p25-transactions
+        item:       {PK: &#39;USER#alice&#39;, SK: &#39;ORDER#o2&#39;, qty: 5}
+        condition:  attribute_not_exists(PK)
+    - Update p25-transactions
+        key:        {PK: &#39;PRODUCT#widget&#39;, SK: &#39;STOCK&#39;}
+        condition:  stock &gt;= 5
+        update:     SET stock = stock - 5
+    - Update p25-transactions
+        key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+        update:     ADD orderCount 1
+
+=== Order o2 (qty 5) cancelled - per-item reasons ===
+[
+  &quot;None&quot;,
+  &quot;ConditionalCheckFailed&quot;,
+  &quot;None&quot;
+]
+
+&gt;&gt;&gt; TransactGetItems
+    - Get p25-transactions
+        key:        {PK: &#39;PRODUCT#widget&#39;, SK: &#39;STOCK&#39;}
+    - Get p25-transactions
+        key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+    - Get p25-transactions
+        key:        {PK: &#39;USER#alice&#39;, SK: &#39;ORDER#o2&#39;}
+
+=== TransactGetItems: stock, profile, ORDER#o2 ===
+[
+  {
+    &quot;SK&quot;: &quot;STOCK&quot;,
+    &quot;stock&quot;: 1,
+    &quot;PK&quot;: &quot;PRODUCT#widget&quot;
+  },
+  {
+    &quot;SK&quot;: &quot;PROFILE&quot;,
+    &quot;orderCount&quot;: 1,
+    &quot;PK&quot;: &quot;USER#alice&quot;
+  },
+  null
+]
+</code></pre></div>
+<p><code>CancellationReasons</code> points straight at the second action, the stock check. The <code>TransactGetItems</code> snapshot then proves nothing from the failed transaction leaked through: stock is still 1, <code>orderCount</code> is still 1, and <code>ORDER#o2</code> doesn't exist, even though the order <code>Put</code> and the counter <code>Update</code> had nothing wrong with them on their own.</p>
+<h3 id="why_3">Why</h3>
+<ul>
+<li><strong>Correctness.</strong> Use it for invariants that span items: stock never goes negative, a username stays unique (see <a href="#26--unique-constraints-on-non-key-attributes">26</a>), a balance transfer debits and credits together.</li>
+<li><strong>No custom saga or rollback code</strong> for the simple cases.</li>
+</ul>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li><strong>Twice the cost.</strong> Each item in a transaction uses 2 WCUs/RCUs instead of 1.</li>
+<li><strong>Limits.</strong> Up to 100 actions and 4 MB in total, and we can't touch the same item twice in one transaction.</li>
+<li><strong>Conflicts.</strong> Concurrent transactions on the same items fail with <code>TransactionConflict</code>, and hot items in transactions make contention worse.</li>
+<li>We can't read a value and then use it in the same transaction. Conditions only compare against constants we pass in.</li>
+<li>For a single-item invariant, a <a href="#22--conditional-writes">conditional write</a> is cheaper, and so is an <a href="#24--atomic-counters">atomic counter</a>.</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li><code>TransactionCanceledException</code> is a <code>ClientError</code>. Read <code>e.response["CancellationReasons"]</code>, because the error message alone is vague.</li>
+<li>Transactions work within one region. On global tables, other regions see the writes replicated item by item, not as one atomic unit (<a href="../08-operations/#40--global-tables-multi-region">global tables</a>).</li>
+<li>Streams emit one record per item, not one per transaction (<a href="../06-lifecycle-and-events/#31--dynamodb-streams--cdc">Streams / CDC</a>).</li>
+</ul>
+<hr />
+<h2 id="26--unique-constraints-on-non-key-attributes">26 · Unique constraints on non-key attributes</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/26-unique-constraints/26-unique-constraints.py">26-unique-constraints.py</a> · run with <code>just run 26</code></p>
+<h3 id="problem_4">Problem</h3>
+<p>DynamoDB only enforces uniqueness on the primary key. We want "email must be unique across users", but email isn't the key, and GSIs don't enforce uniqueness.</p>
+<h3 id="pattern_4">Pattern</h3>
+<p>For each unique value, we write a <strong>sentinel item</strong> whose key <em>is</em> that value. We write it in the <strong>same transaction</strong> as the main item, with <code>attribute_not_exists(PK)</code> on both.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>PROFILE</code></td>
+<td>email=a@x.com</td>
+</tr>
+<tr>
+<td><code>EMAIL#a@x.com</code></td>
+<td><code>EMAIL</code></td>
+<td>user_id=alice</td>
+</tr>
+<tr>
+<td><code>USER#bob</code></td>
+<td><code>PROFILE</code></td>
+<td>email=bob@x.com</td>
+</tr>
+<tr>
+<td><code>EMAIL#bob@x.com</code></td>
+<td><code>EMAIL</code></td>
+<td>user_id=bob</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Create:</strong> <code>TransactWriteItems[ Put user (not exists), Put EMAIL# sentinel (not exists) ]</code></li>
+<li><strong>Change email:</strong> <code>TransactWriteItems[ Delete old sentinel, Put new sentinel (not exists), Update user (email = old) ]</code></li>
+<li><strong>Delete user:</strong> delete the user and the sentinel together.</li>
+</ul>
+<h3 id="in-practice_4">In practice</h3>
+<p>Creating a user is a two-item transaction. Note the <code>email.lower()</code> when building the sentinel key:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">transact_write_items</span><span class="p">(</span>
+    <span class="n">TransactItems</span><span class="o">=</span><span class="p">[</span>
+        <span class="p">{</span><span class="s2">&quot;Put&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;TableName&quot;</span><span class="p">:</span> <span class="n">TABLE</span><span class="p">,</span>
+                 <span class="s2">&quot;Item&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;USER#</span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;PROFILE&quot;</span><span class="p">,</span> <span class="s2">&quot;email&quot;</span><span class="p">:</span> <span class="n">email</span><span class="p">},</span>
+                 <span class="s2">&quot;ConditionExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;attribute_not_exists(PK)&quot;</span><span class="p">}},</span>
+        <span class="p">{</span><span class="s2">&quot;Put&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;TableName&quot;</span><span class="p">:</span> <span class="n">TABLE</span><span class="p">,</span>
+                 <span class="s2">&quot;Item&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;EMAIL#</span><span class="si">{</span><span class="n">email</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;EMAIL&quot;</span><span class="p">,</span> <span class="s2">&quot;user_id&quot;</span><span class="p">:</span> <span class="n">user_id</span><span class="p">},</span>
+                 <span class="s2">&quot;ConditionExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;attribute_not_exists(PK)&quot;</span><span class="p">}},</span>
+    <span class="p">]</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>Alice signs up with <code>a@x.com</code>. Then Bob tries <code>A@x.com</code>:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; TransactWriteItems
+    - Put p26-unique-constraints
+        item:       {PK: &#39;USER#bob&#39;, SK: &#39;PROFILE&#39;, email: &#39;A@x.com&#39;}
+        condition:  attribute_not_exists(PK)
+    - Put p26-unique-constraints
+        item:       {PK: &#39;EMAIL#a@x.com&#39;, SK: &#39;EMAIL&#39;, user_id: &#39;bob&#39;}
+        condition:  attribute_not_exists(PK)
+
+=== bob tries A@x.com (same email, different case) ===
+{
+  &quot;error&quot;: &quot;TransactionCanceledException&quot;,
+  &quot;reasons&quot;: [
+    &quot;None&quot;,
+    &quot;ConditionalCheckFailed&quot;
+  ]
+}
+</code></pre></div>
+<p>Bob then signs up with <code>b@x.com</code>, tries to change it to the taken <code>a@x.com</code> (refused on the new-sentinel <code>Put</code>), and finally changes it to <code>bob@x.com</code>:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; TransactWriteItems
+    - Delete p26-unique-constraints
+        key:        {PK: &#39;EMAIL#b@x.com&#39;, SK: &#39;EMAIL&#39;}
+    - Put p26-unique-constraints
+        item:       {PK: &#39;EMAIL#a@x.com&#39;, SK: &#39;EMAIL&#39;, user_id: &#39;bob&#39;}
+        condition:  attribute_not_exists(PK)
+    - Update p26-unique-constraints
+        key:        {PK: &#39;USER#bob&#39;, SK: &#39;PROFILE&#39;}
+        condition:  email = &#39;b@x.com&#39;
+        update:     SET email = &#39;a@x.com&#39;
+
+=== bob changes email to a@x.com (taken) ===
+{
+  &quot;error&quot;: &quot;TransactionCanceledException&quot;,
+  &quot;reasons&quot;: [
+    &quot;None&quot;,
+    &quot;ConditionalCheckFailed&quot;,
+    &quot;None&quot;
+  ]
+}
+
+&gt;&gt;&gt; TransactWriteItems
+    - Delete p26-unique-constraints
+        key:        {PK: &#39;EMAIL#b@x.com&#39;, SK: &#39;EMAIL&#39;}
+    - Put p26-unique-constraints
+        item:       {PK: &#39;EMAIL#bob@x.com&#39;, SK: &#39;EMAIL&#39;, user_id: &#39;bob&#39;}
+        condition:  attribute_not_exists(PK)
+    - Update p26-unique-constraints
+        key:        {PK: &#39;USER#bob&#39;, SK: &#39;PROFILE&#39;}
+        condition:  email = &#39;b@x.com&#39;
+        update:     SET email = &#39;bob@x.com&#39;
+
+=== bob changes email to bob@x.com ===
+&quot;OK&quot;
+
+&gt;&gt;&gt; GetItem p26-unique-constraints
+    key:        {PK: &#39;EMAIL#bob@x.com&#39;, SK: &#39;EMAIL&#39;}
+
+=== Who owns bob@x.com? ===
+{
+  &quot;SK&quot;: &quot;EMAIL&quot;,
+  &quot;user_id&quot;: &quot;bob&quot;,
+  &quot;PK&quot;: &quot;EMAIL#bob@x.com&quot;
+}
+
+&gt;&gt;&gt; Scan p26-unique-constraints
+
+=== All items ===
+[
+  &quot;EMAIL#a@x.com | EMAIL&quot;,
+  &quot;EMAIL#bob@x.com | EMAIL&quot;,
+  &quot;USER#alice | PROFILE&quot;,
+  &quot;USER#bob | PROFILE&quot;
+]
+</code></pre></div>
+<p>Because the sentinel key is lower-cased, <code>A@x.com</code> collides with Alice's <code>a@x.com</code>, and the reasons list tells us it was the email (the second action) that failed, not the user. The failed email change deleted nothing: <code>EMAIL#b@x.com</code> survived until the successful change replaced it. The final scan is exactly the table from the pattern above, and "who owns <code>bob@x.com</code>?" is a single <code>GetItem</code>.</p>
+<h3 id="why_4">Why</h3>
+<ul>
+<li>Real uniqueness, enforced by DynamoDB, with no race conditions.</li>
+<li>The sentinel is also a free lookup: "which user has this email?" is a <code>GetItem</code>.</li>
+</ul>
+<h3 id="trade-offs_4">Trade-offs</h3>
+<ul>
+<li>Transactions cost 2x write capacity and allow at most 100 items.</li>
+<li>Each unique attribute adds one item per entity.</li>
+<li>All writers must use the same transactional path. A plain <code>PutItem</code> that skips the sentinel breaks the rule.</li>
+</ul>
+<h3 id="gotchas_4">Gotchas</h3>
+<ul>
+<li>Normalise the value before using it as a key (lower-case emails, trim spaces). Otherwise <code>A@x.com</code> and <code>a@x.com</code> are "different".</li>
+<li>On failure, look at <code>CancellationReasons</code> to see which item's condition failed (user exists vs. email taken).</li>
+<li>See <a href="#25--transactions">transactions</a> and <a href="#22--conditional-writes">conditional writes</a>.</li>
+</ul>
+<hr />
+<h2 id="27--idempotency-keys">27 · Idempotency keys</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/27-idempotency-keys/27-idempotency-keys.py">27-idempotency-keys.py</a> · run with <code>just run 27</code></p>
+<h3 id="problem_5">Problem</h3>
+<p>Networks fail after the work is done but before the response arrives. Clients, SDKs, queues (SQS, EventBridge) and Lambda all retry. Without protection, a retried "charge card" request charges the card twice.</p>
+<h3 id="pattern_5">Pattern</h3>
+<p>The client sends a unique <strong>idempotency key</strong> with each logical request, and the server records it in DynamoDB:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>status</th>
+<th>response</th>
+<th>expiresAt</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IDEMPOTENCY#req-123</code></td>
+<td><code>RECORD</code></td>
+<td><code>IN_PROGRESS</code>/<code>COMPLETED</code></td>
+<td>stored result</td>
+<td>epoch + 24h</td>
+</tr>
+</tbody>
+</table>
+<pre class="mermaid">
+flowchart TD
+    A[Request with key] --&gt; B{&quot;PutItem IN_PROGRESS&lt;br&gt;attribute_not_exists(PK)&quot;}
+    B -- succeeds --&gt; C[Do the side effect once]
+    C --&gt; D[Store response, status = COMPLETED]
+    D --&gt; E[Return response]
+    B -- ConditionalCheckFailed --&gt; F{Read record}
+    F -- COMPLETED --&gt; G[Return stored response]
+    F -- IN_PROGRESS --&gt; H[Tell client to retry later]
+</pre>
+
+<ol>
+<li><strong>Claim:</strong> <code>PutItem</code> with <code>attribute_not_exists(PK)</code>. Only the first request wins.</li>
+<li><strong>Work:</strong> do the side effect once.</li>
+<li><strong>Complete:</strong> store the response and set <code>status = COMPLETED</code>.</li>
+<li><strong>Retry:</strong> the conditional put fails, so we read the record and return the stored response. If it's still <code>IN_PROGRESS</code>, we tell the client to retry later.</li>
+</ol>
+<p>A TTL on <code>expiresAt</code> cleans up old records (<a href="../06-lifecycle-and-events/#30--ttl-for-expiry">TTL for expiry</a>).</p>
+<h3 id="in-practice_5">In practice</h3>
+<p>The script wraps a fake <code>charge_card</code> (it appends to a <code>charges</code> list in place of a payment provider):</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">try</span><span class="p">:</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span>
+        <span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="o">**</span><span class="n">key</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;IN_PROGRESS&quot;</span><span class="p">,</span> <span class="s2">&quot;expiresAt&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())</span> <span class="o">+</span> <span class="mi">24</span> <span class="o">*</span> <span class="mi">3600</span><span class="p">},</span>
+        <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;attribute_not_exists(PK)&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+<span class="k">except</span> <span class="n">cond_failed</span><span class="p">:</span>
+    <span class="n">record</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="n">key</span><span class="p">,</span> <span class="n">ConsistentRead</span><span class="o">=</span><span class="kc">True</span><span class="p">)[</span><span class="s2">&quot;Item&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;status&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;COMPLETED&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;response&quot;</span><span class="p">]</span>  <span class="c1"># replay the stored result</span>
+    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;request already in progress - retry later&quot;</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p27-idempotency-keys
+    item:       {PK: &#39;IDEMPOTENCY#req-123&#39;, SK: &#39;RECORD&#39;, status: &#39;IN_PROGRESS&#39;, expiresAt: 1792583312}
+    condition:  attribute_not_exists(PK)
+
+&gt;&gt;&gt; UpdateItem p27-idempotency-keys
+    key:        {PK: &#39;IDEMPOTENCY#req-123&#39;, SK: &#39;RECORD&#39;}
+    update:     SET status = &#39;COMPLETED&#39;, response = {chargeId: &#39;ch_1&#39;, amount: 50}
+
+=== First call ===
+{
+  &quot;chargeId&quot;: &quot;ch_1&quot;,
+  &quot;amount&quot;: 50
+}
+
+&gt;&gt;&gt; PutItem p27-idempotency-keys
+    item:       {PK: &#39;IDEMPOTENCY#req-123&#39;, SK: &#39;RECORD&#39;, status: &#39;IN_PROGRESS&#39;, expiresAt: 1792583312}
+    condition:  attribute_not_exists(PK)
+
+&gt;&gt;&gt; GetItem p27-idempotency-keys
+    key:        {PK: &#39;IDEMPOTENCY#req-123&#39;, SK: &#39;RECORD&#39;}
+    ConsistentRead: True
+
+=== Client retries same key ===
+{
+  &quot;chargeId&quot;: &quot;ch_1&quot;,
+  &quot;amount&quot;: 50
+}
+
+&gt;&gt;&gt; PutItem p27-idempotency-keys
+    item:       {PK: &#39;IDEMPOTENCY#req-456&#39;, SK: &#39;RECORD&#39;, status: &#39;IN_PROGRESS&#39;, expiresAt: 1792583312}
+    condition:  attribute_not_exists(PK)
+
+&gt;&gt;&gt; UpdateItem p27-idempotency-keys
+    key:        {PK: &#39;IDEMPOTENCY#req-456&#39;, SK: &#39;RECORD&#39;}
+    update:     SET status = &#39;COMPLETED&#39;, response = {chargeId: &#39;ch_2&#39;, amount: 20}
+
+=== New key ===
+{
+  &quot;chargeId&quot;: &quot;ch_2&quot;,
+  &quot;amount&quot;: 20
+}
+
+=== Card was actually charged ===
+[
+  50,
+  20
+]
+</code></pre></div>
+<p>The retry of <code>req-123</code> never reaches the <code>UpdateItem</code>: its claim fails, so it reads the record and replays <code>ch_1</code>. Three calls produce two charges, which is exactly what the client meant.</p>
+<h3 id="why_5">Why</h3>
+<ul>
+<li>It gives us <strong>exactly-once effects</strong> on top of at-least-once delivery.</li>
+<li>Retries become safe everywhere: API handlers, SQS consumers, stream processors.</li>
+</ul>
+<h3 id="trade-offs_5">Trade-offs</h3>
+<ul>
+<li>It's an extra write (or two) per request.</li>
+<li><strong>Crashes.</strong> If we crash between claim and complete, the record stays <code>IN_PROGRESS</code>. Give it a short in-progress timeout so it can be reclaimed, e.g. an <code>inProgressExpiry</code> attribute checked in the claim condition.</li>
+<li>The side effect itself (e.g. a payment provider) should also accept our idempotency key. DynamoDB can't roll back an external call.</li>
+</ul>
+<h3 id="gotchas_5">Gotchas</h3>
+<ul>
+<li>Derive the key from the client's request ID or a hash of the payload, not from a server-side timestamp.</li>
+<li>Decide what a retry with the same key but a <em>different</em> payload means. Usually it's an error: store a payload hash and compare.</li>
+<li>AWS Lambda Powertools (<code>aws_lambda_powertools.utilities.idempotency</code>) implements this pattern on top of DynamoDB.</li>
+<li>Related: <a href="#22--conditional-writes">conditional writes</a>, and <a href="#25--transactions">transactions</a> with <code>ClientRequestToken</code>.</li>
+</ul>
+<hr />
+<h2 id="28--gsis-are-eventually-consistent">28 · GSIs are eventually consistent</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/28-gsi-eventual-consistency/28-gsi-eventual-consistency.py">28-gsi-eventual-consistency.py</a> · run with <code>just run 28</code></p>
+<h3 id="problem_6">Problem</h3>
+<p>GSIs are updated <strong>asynchronously</strong>, after the table write succeeds. A read straight after a write can miss the new item or return the old version, and <code>ConsistentRead=True</code> is rejected on a GSI.</p>
+<h3 id="pattern_6">Pattern</h3>
+<p>We either design so this doesn't matter, or work around it:</p>
+<ol>
+<li><strong>Read your own writes from the base table.</strong> After a write, <code>GetItem</code>/<code>Query</code> the table by primary key with <code>ConsistentRead=True</code>.</li>
+<li><strong>Return what you wrote.</strong> The API response uses the item we just wrote, not a re-query of the index.</li>
+<li><strong>Short retry with backoff</strong> when we must read from the index (see <code>query_gsi_until_found</code> below).</li>
+<li><strong>Never rely on a GSI for invariants.</strong> A GSI doesn't enforce uniqueness, and it can lag. Use <a href="#22--conditional-writes">conditional writes</a> or <a href="#26--unique-constraints-on-non-key-attributes">transactions</a> on the base table instead.</li>
+</ol>
+<h3 id="in-practice_6">In practice</h3>
+<p>DynamoDB Local updates indexes instantly, so the script can't reproduce the lag itself. What it can show is the rejected consistent read, both workarounds, and a GSI happily holding a duplicate:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">query_gsi_until_found</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="n">attempts</span><span class="o">=</span><span class="mi">5</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">attempts</span><span class="p">):</span>
+        <span class="n">items</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">IndexName</span><span class="o">=</span><span class="s2">&quot;GSI1&quot;</span><span class="p">,</span> <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;GSI1PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="n">value</span><span class="p">))[</span><span class="s2">&quot;Items&quot;</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">items</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">items</span><span class="p">,</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.05</span> <span class="o">*</span> <span class="mi">2</span><span class="o">**</span><span class="n">i</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">[],</span> <span class="n">attempts</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p28-gsi-consistency
+    key:        GSI1PK = &#39;EMAIL#a@x.com&#39;
+    IndexName:  GSI1
+    ConsistentRead: True
+
+=== ConsistentRead=True on a GSI ===
+&quot;Consistent reads are not supported on global secondary indexes&quot;
+
+&gt;&gt;&gt; PutItem p28-gsi-consistency
+    item:       {PK: &#39;USER#1&#39;, SK: &#39;PROFILE&#39;, GSI1PK: &#39;EMAIL#a@x.com&#39;, GSI1SK: &#39;USER#1&#39;}
+
+&gt;&gt;&gt; Query p28-gsi-consistency
+    key:        GSI1PK = &#39;EMAIL#a@x.com&#39;
+    IndexName:  GSI1
+
+=== Immediate GSI read after write (Local is instant; AWS may return 0) ===
+1
+
+&gt;&gt;&gt; GetItem p28-gsi-consistency
+    key:        {PK: &#39;USER#1&#39;, SK: &#39;PROFILE&#39;}
+    ConsistentRead: True
+
+=== Strongly consistent read from the base table ===
+{
+  &quot;SK&quot;: &quot;PROFILE&quot;,
+  &quot;PK&quot;: &quot;USER#1&quot;,
+  &quot;GSI1PK&quot;: &quot;EMAIL#a@x.com&quot;,
+  &quot;GSI1SK&quot;: &quot;USER#1&quot;
+}
+
+&gt;&gt;&gt; Query p28-gsi-consistency
+    key:        GSI1PK = &#39;EMAIL#a@x.com&#39;
+    IndexName:  GSI1
+
+=== GSI read with retry (found after 1 attempt(s)) ===
+[
+  {
+    &quot;SK&quot;: &quot;PROFILE&quot;,
+    &quot;PK&quot;: &quot;USER#1&quot;,
+    &quot;GSI1PK&quot;: &quot;EMAIL#a@x.com&quot;,
+    &quot;GSI1SK&quot;: &quot;USER#1&quot;
+  }
+]
+
+&gt;&gt;&gt; PutItem p28-gsi-consistency
+    item:       {PK: &#39;USER#2&#39;, SK: &#39;PROFILE&#39;, GSI1PK: &#39;EMAIL#a@x.com&#39;, GSI1SK: &#39;USER#2&#39;}
+
+&gt;&gt;&gt; Query p28-gsi-consistency
+    key:        GSI1PK = &#39;EMAIL#a@x.com&#39;
+    IndexName:  GSI1
+
+=== Two users with the same email in the GSI ===
+[
+  &quot;USER#1&quot;,
+  &quot;USER#2&quot;
+]
+</code></pre></div>
+<p>Locally the immediate index read finds the item and the retry succeeds first time. On AWS, that <code>1</code> could be a <code>0</code>, which is why the retry exists. The last block is the real lesson: two users now share <code>EMAIL#a@x.com</code> in the index, and nothing stopped it.</p>
+<h3 id="why_6">Why</h3>
+<ul>
+<li>Replication to an index usually takes well under a second, but there's no upper bound. During throttling or heavy writes it can take longer.</li>
+<li>"Check the GSI, then write" is a race. Two users can register the same email if we check uniqueness via a GSI.</li>
+</ul>
+<h3 id="trade-offs_6">Trade-offs</h3>
+<ul>
+<li>Strongly consistent reads on the base table cost twice as much as eventually consistent ones.</li>
+<li>LSIs <strong>do</strong> support strong consistency, but they must be created with the table, they cap each item collection at 10 GB, and they share the partition's throughput.</li>
+</ul>
+<h3 id="gotchas_6">Gotchas</h3>
+<ul>
+<li><strong>Back-pressure.</strong> If a GSI is under-provisioned, it throttles <strong>writes to the base table</strong>. Provision GSIs at least as high as the table, or use on-demand (<a href="../08-operations/#38--capacity-modes-on-demand-vs-provisioned">capacity modes</a>).</li>
+<li>DynamoDB Local updates indexes instantly, so it won't reproduce this. Test the logic, not the timing.</li>
+</ul>
+<hr />
+<h2 id="29--distributed-locking">29 · Distributed locking</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/05-consistency/29-distributed-locking/29-distributed-locking.py">29-distributed-locking.py</a> · run with <code>just run 29</code></p>
+<h3 id="problem_7">Problem</h3>
+<p>Several workers or instances must not do the same job at the same time: a nightly invoice run, a migration, processing one customer's queue. We need a lock that every machine can see.</p>
+<h3 id="pattern_7">Pattern</h3>
+<p>The lock is an item. We <strong>acquire</strong> it with a conditional put that only succeeds if the lock doesn't exist or its lease has expired. We <strong>release</strong> it with a conditional delete that only succeeds if we still own it.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>owner</th>
+<th>expiresAt (epoch)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>LOCK#invoice-run</code></td>
+<td><code>LOCK</code></td>
+<td>worker-A</td>
+<td>1792494214</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># acquire</span>
+<span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="n">lock</span><span class="p">,</span>
+         <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;attribute_not_exists(PK) OR expiresAt &lt; :now&quot;</span><span class="p">)</span>
+<span class="c1"># heartbeat (extend lease)</span>
+<span class="n">update_item</span><span class="p">(</span><span class="n">SET</span> <span class="n">expiresAt</span> <span class="o">=</span> <span class="p">:</span><span class="n">later</span><span class="p">,</span> <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;owner = :me&quot;</span><span class="p">)</span>
+<span class="c1"># release</span>
+<span class="n">delete_item</span><span class="p">(</span><span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;owner = :me&quot;</span><span class="p">)</span>
+</code></pre></div>
+<h3 id="in-practice_7">In practice</h3>
+<p>The script uses a 2-second lease and walks through four scenes:</p>
+<ol>
+<li>A acquires the lock, and B is refused.</li>
+<li>A heartbeats, then releases; B acquires.</li>
+<li>B crashes without releasing. After the lease expires, C takes over.</li>
+<li>"Zombie" B tries to release C's lock and is refused.</li>
+</ol>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p29-distributed-locking
+    item:       {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;, owner: &#39;worker-A&#39;, expiresAt: 1792496915}
+    condition:  attribute_not_exists(PK) OR expiresAt &lt; 1792496913
+
+=== worker-A acquires ===
+true
+
+&gt;&gt;&gt; PutItem p29-distributed-locking
+    item:       {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;, owner: &#39;worker-B&#39;, expiresAt: 1792496915}
+    condition:  attribute_not_exists(PK) OR expiresAt &lt; 1792496913
+
+=== worker-B tries while A holds it ===
+false
+
+&gt;&gt;&gt; UpdateItem p29-distributed-locking
+    key:        {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;}
+    condition:  owner = &#39;worker-A&#39;
+    update:     SET expiresAt = 1792496915
+
+...
+
+&gt;&gt;&gt; DeleteItem p29-distributed-locking
+    key:        {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;}
+    condition:  owner = &#39;worker-A&#39;
+
+=== worker-A releases ===
+true
+
+&gt;&gt;&gt; PutItem p29-distributed-locking
+    item:       {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;, owner: &#39;worker-B&#39;, expiresAt: 1792496915}
+    condition:  attribute_not_exists(PK) OR expiresAt &lt; 1792496913
+
+=== worker-B acquires after release ===
+true
+
+... worker-B crashes, waiting 3s for the lease to expire ...
+
+&gt;&gt;&gt; PutItem p29-distributed-locking
+    item:       {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;, owner: &#39;worker-C&#39;, expiresAt: 1792496918}
+    condition:  attribute_not_exists(PK) OR expiresAt &lt; 1792496916
+
+=== worker-C takes over the expired lock ===
+true
+
+&gt;&gt;&gt; DeleteItem p29-distributed-locking
+    key:        {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;}
+    condition:  owner = &#39;worker-B&#39;
+
+=== zombie worker-B tries to release C&#39;s lock ===
+false
+
+&gt;&gt;&gt; GetItem p29-distributed-locking
+    key:        {PK: &#39;LOCK#invoice-run&#39;, SK: &#39;LOCK&#39;}
+
+=== lock still held by ===
+&quot;worker-C&quot;
+</code></pre></div>
+<p>The timestamps tell the story. B's lease runs until <code>…915</code>, so when C arrives at <code>…916</code> the <code>expiresAt &lt; 1792496916</code> half of the condition is true and C takes over. When B wakes up and tries to clean up, the <code>owner = 'worker-B'</code> condition stops it deleting a lock that's no longer B's.</p>
+<h3 id="why_7">Why</h3>
+<ul>
+<li><strong>No extra infrastructure.</strong> There's no Redis, ZooKeeper or etcd to run.</li>
+<li><strong>Crash-safe.</strong> The lease means a dead holder can't block everyone forever.</li>
+<li><strong>Safe release.</strong> The owner check stops one worker from deleting another's lock.</li>
+</ul>
+<h3 id="trade-offs_7">Trade-offs</h3>
+<ul>
+<li><strong>Leases depend on clocks.</strong> A paused process (GC pause, slow network) can wake up after its lease has expired and <em>think</em> it still holds the lock. Holders must heartbeat well before expiry and stop work if a heartbeat fails.</li>
+<li>For strict safety, use a <strong>fencing token</strong>: a number that increases on every acquisition (e.g. <code>ADD fencingToken :1</code> on an item that's never deleted). The protected resource then rejects writes that carry an older token.</li>
+<li>Each acquire, heartbeat and release costs a write. That's fine for coarse locks, but not for millisecond-level ones.</li>
+</ul>
+<h3 id="gotchas_7">Gotchas</h3>
+<ul>
+<li>Also set <code>expiresAt</code> as the table's TTL attribute (<a href="../06-lifecycle-and-events/#30--ttl-for-expiry">TTL for expiry</a>) so abandoned lock items get cleaned up. Don't rely on TTL for correctness, though: deletion can lag by hours. The <code>expiresAt &lt; :now</code> condition is what makes takeover work.</li>
+<li>The ready-made library is the <a href="https://github.com/awslabs/amazon-dynamodb-lock-client">DynamoDB Lock Client</a> (Java). In Python, <code>python-dynamodb-lock</code> follows the same design.</li>
+<li>Related: <a href="#22--conditional-writes">conditional writes</a> and <a href="#23--optimistic-locking">optimistic locking</a>. Prefer optimistic locking if we only need to protect a single item.</li>
+</ul>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/04-item-size/">04 - Item size &amp; large data</a> | <a href="/posts/08-dynamodb-patterns/06-lifecycle-and-events/">06 - Lifecycle &amp; events</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

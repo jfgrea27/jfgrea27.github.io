@@ -6,10 +6,31 @@ table { display: block; overflow-x: auto; width: fit-content; max-width: 100%; m
 pre { overflow-x: auto; }
 mjx-container[display="true"] { overflow-x: auto; overflow-y: hidden; }
 
-/* code: dark box for blocks, light tint for inline, so code stands apart from prose */
-pre:not(.mermaid) { background: #1e1e2e; color: #e4e4ef; border-left: 4px solid #7aa2f7; border-radius: 6px; padding: 0.9em 1.1em; line-height: 1.45; }
-code { background: #ececf2; color: #b3245b; border-radius: 3px; padding: 0.1em 0.35em; font-size: 0.9em; }
+/* code: light grey box for blocks, tinted inline, so code stands apart from prose */
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+pre:not(.mermaid) { background: #f6f8fa; color: #24292f; border: 1px solid #d0d7de; border-radius: 8px; padding: 1em 1.2em; line-height: 1.55; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06); }
+code { background: #ececf2; color: #b3245b; border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.88em; }
 pre code { background: none; color: inherit; padding: 0; font-size: 0.85em; }
+
+/* centred like tables: as wide as the code, at least 600px so one-liners don't shrink to a sliver */
+.highlight { width: fit-content; min-width: min(100%, 600px); max-width: 100%; margin: 1em auto; }
+/* language label sits on top of the block as a tab */
+.highlight .filename { display: block; background: #eaeef2; color: #57606a; border: 1px solid #d0d7de; border-bottom: none; border-radius: 8px 8px 0 0; padding: 0.35em 1.2em; font: 0.75em ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.04em; text-transform: lowercase; }
+.highlight .filename + pre { margin-top: 0; border-radius: 0 0 8px 8px; }
+.highlight pre { margin: 0; }
+
+/* syntax colours (GitHub light) */
+.highlight .c, .highlight .c1, .highlight .cm, .highlight .ch, .highlight .cs, .highlight .cp, .highlight .cpf { color: #6e7781; font-style: italic; }
+.highlight .k, .highlight .kd, .highlight .kn, .highlight .kp, .highlight .kr, .highlight .ow { color: #cf222e; }
+.highlight .kc, .highlight .bp, .highlight .m, .highlight .mi, .highlight .mf, .highlight .mh, .highlight .mo, .highlight .mb, .highlight .il { color: #0550ae; }
+.highlight .kt, .highlight .nc, .highlight .nd, .highlight .ne { color: #953800; }
+.highlight .nb { color: #0550ae; }
+.highlight .nf, .highlight .fm, .highlight .gp, .highlight .na { color: #8250df; }
+.highlight .s, .highlight .s1, .highlight .s2, .highlight .sa, .highlight .sb, .highlight .sc, .highlight .dl, .highlight .sd, .highlight .sh, .highlight .sx, .highlight .ss { color: #0a3069; }
+.highlight .se, .highlight .si, .highlight .sr, .highlight .o { color: #cf222e; }
+.highlight .nt, .highlight .nv, .highlight .vi { color: #116329; }
+.highlight .gd { color: #82071e; background: #ffebe9; }
+.highlight .gi { color: #116329; background: #dafbe1; }
 
 /* tables: full grid */
 table { border-collapse: collapse; }

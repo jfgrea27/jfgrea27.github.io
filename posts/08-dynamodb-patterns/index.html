@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DynamoDB patterns</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<h1>DynamoDB patterns</h1>
+<p><small>2026-10-20</small></p>
+<p><a href="https://aws.amazon.com/dynamodb/">Amazon DynamoDB</a> promises <strong>single-digit-millisecond latency at any scale</strong>. The catch is that it gets there by refusing to do anything slow: no joins, no ad-hoc queries, no query planner to save you. If you model a DynamoDB table like a relational one, it will work for a while, then get expensive, then get slow.</p>
+<p>The way out is a small set of design patterns that come up again and again: prefixed keys, single-table design, overloaded indexes, conditional writes, write sharding and so on. This series goes through 43 of them, grouped into 9 topics. Each one is explained, run, and shown with the exact requests it sends to DynamoDB.</p>
+<p>All the code can be found in my <a href="https://github.com/jfgrea27/dynamodb-patterns">dynamodb-patterns</a> repository. Every pattern there is a short write-up (<code>.md</code>) plus a runnable Python demo (<code>.py</code>) that runs against <strong>DynamoDB Local</strong>, so you don't need an AWS account to follow along.</p>
+<hr />
+<h2 id="how-the-repository-works">How the repository works</h2>
+<p>The repo uses <code>docker compose</code> for DynamoDB Local, <code>uv</code> for Python dependencies and <code>just</code> as a task runner (a nix flake provides all three if you use <code>direnv</code>):</p>
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/jfgrea27/dynamodb-patterns<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>dynamodb-patterns
+just<span class="w"> </span>setup<span class="w">          </span><span class="c1"># uv sync + pull the DynamoDB Local image</span>
+just<span class="w"> </span>up<span class="w">             </span><span class="c1"># start DynamoDB Local on localhost:8000</span>
+just<span class="w"> </span>run<span class="w"> </span><span class="m">4</span><span class="w">          </span><span class="c1"># run pattern 04 (single-table design)</span>
+just<span class="w"> </span><span class="nb">read</span><span class="w"> </span><span class="m">4</span><span class="w">         </span><span class="c1"># print its write-up</span>
+just<span class="w"> </span>run-all<span class="w">        </span><span class="c1"># run every pattern and report failures</span>
+just<span class="w"> </span>down<span class="w">           </span><span class="c1"># stop DynamoDB Local</span>
+</code></pre></div>
+<p>Patterns are numbered in reading order, so each one only builds on those before it. They live in category folders: <code>patterns/&lt;category&gt;/NN-name/NN-name.{md,py}</code>.</p>
+<p>A few things make the demos useful as a learning tool:</p>
+<ul>
+<li><strong>Every request is printed.</strong> Each DynamoDB call is shown with its key condition, filter, condition and update expressions, with the real names and values substituted in. You see exactly what was sent, not just what came back.</li>
+<li><strong>Safe to re-run.</strong> Each script drops and recreates its own <code>pNN-*</code> table.</li>
+<li><strong>Simulated where needed.</strong> DynamoDB Local doesn't support S3, DAX, point-in-time recovery, global tables, table export or TTL deletion. Those lessons simulate the behaviour and show the real AWS call alongside.</li>
+</ul>
+<p>For example, here is part of the output of <code>just run 4</code>. One <code>Query</code> fetches a user and all of their orders, newest first:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p04-single-table
+    key:        (PK = &#39;USER#alice&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+    ScanIndexForward: False
+
+=== Alice&#39;s orders, newest first ===
+[
+  {
+    &quot;SK&quot;: &quot;ORDER#2026-10-15#o2&quot;,
+    &quot;total&quot;: 17,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;Order&quot;
+  },
+  {
+    &quot;SK&quot;: &quot;ORDER#2026-10-01#o1&quot;,
+    &quot;total&quot;: 42,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;Order&quot;
+  }
+]
+</code></pre></div>
+<p>Every pattern in the series includes output like this, captured from a real run.</p>
+<hr />
+<h2 id="the-topics">The topics</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Topic</th>
+<th>What it covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>01</td>
+<td><a href="01-intro-and-setup/">Intro &amp; setup</a></td>
+<td>What DynamoDB is, the basic API, and developing against DynamoDB Local</td>
+</tr>
+<tr>
+<td>02</td>
+<td><a href="02-modelling/">Modelling</a></td>
+<td>Designing partition keys, sort keys and indexes so every access pattern is a <code>GetItem</code> or <code>Query</code></td>
+</tr>
+<tr>
+<td>03</td>
+<td><a href="03-querying/">Querying</a></td>
+<td>Reading efficiently: Scan vs Query, filters, pagination, projections, batches</td>
+</tr>
+<tr>
+<td>04</td>
+<td><a href="04-item-size/">Item size &amp; large data</a></td>
+<td>Living with the 400 KB item limit and per-KB pricing</td>
+</tr>
+<tr>
+<td>05</td>
+<td><a href="05-consistency/">Consistency &amp; concurrency</a></td>
+<td>Correct concurrent writes with conditions, transactions, idempotency and locks</td>
+</tr>
+<tr>
+<td>06</td>
+<td><a href="06-lifecycle-and-events/">Lifecycle &amp; events</a></td>
+<td>TTL expiry, DynamoDB Streams and archival</td>
+</tr>
+<tr>
+<td>07</td>
+<td><a href="07-performance-and-scale/">Performance &amp; scale</a></td>
+<td>Hot partitions, write sharding, caching and time-series data</td>
+</tr>
+<tr>
+<td>08</td>
+<td><a href="08-operations/">Operations</a></td>
+<td>Capacity modes, backups, multi-region and analytics</td>
+</tr>
+<tr>
+<td>09</td>
+<td><a href="09-anti-patterns/">What not to do</a></td>
+<td>The common mistakes, measured, and the pattern that fixes each one</td>
+</tr>
+</tbody>
+</table>
+<p>If you're new to DynamoDB, start with <a href="01-intro-and-setup/">01 - Intro &amp; setup</a>. <a href="02-modelling/">Modelling</a> is the heart of the series, and most later topics build on it.</p>
+<h2 id="the-mental-model-to-carry-forward">The mental model to carry forward</h2>
+<p>If you take only five things away from this series:</p>
+<ol>
+<li><strong>Start from the access patterns.</strong> Write down every question the app asks, then design keys so each one is a <code>GetItem</code> or a <code>Query</code>.</li>
+<li><strong>Store data the way it is read.</strong> Items fetched together share a partition key. Data needed on another item gets copied there.</li>
+<li><strong>Spread the load.</strong> Use high-cardinality partition keys so traffic and storage spread across partitions.</li>
+<li><strong>Keep items small</strong> and avoid <code>Scan</code> in request paths.</li>
+<li><strong>Use conditions for correctness.</strong> Atomic updates and conditional writes replace locks.</li>
+</ol>
+<h2 id="further-reading">Further reading</h2>
+<ul>
+<li>Alex DeBrie, <a href="https://www.dynamodbbook.com/"><em>The DynamoDB Book</em></a></li>
+<li>Rick Houlihan, AWS re:Invent, "Advanced design patterns for DynamoDB"</li>
+<li>The <a href="https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Introduction.html">DynamoDB developer guide</a></li>
+<li>The original <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf">Dynamo paper</a> (2007)</li>
+</ul>
+<ul>
+<li><a href="/posts/08-dynamodb-patterns/01-intro-and-setup/">01 - Intro &amp; setup</a></li>
+<li><a href="/posts/08-dynamodb-patterns/02-modelling/">02 - Modelling</a></li>
+<li><a href="/posts/08-dynamodb-patterns/03-querying/">03 - Querying</a></li>
+<li><a href="/posts/08-dynamodb-patterns/04-item-size/">04 - Item size &amp; large data</a></li>
+<li><a href="/posts/08-dynamodb-patterns/05-consistency/">05 - Consistency &amp; concurrency</a></li>
+<li><a href="/posts/08-dynamodb-patterns/06-lifecycle-and-events/">06 - Lifecycle &amp; events</a></li>
+<li><a href="/posts/08-dynamodb-patterns/07-performance-and-scale/">07 - Performance &amp; scale</a></li>
+<li><a href="/posts/08-dynamodb-patterns/08-operations/">08 - Operations</a></li>
+<li><a href="/posts/08-dynamodb-patterns/09-anti-patterns/">09 - What not to do</a></li>
+</ul>
+<hr>
+<p><a href="/posts/08-dynamodb-patterns/01-intro-and-setup/">01 - Intro &amp; setup</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

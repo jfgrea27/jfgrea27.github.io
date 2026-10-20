@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08 - Operations</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>08 - Operations</h1>
+<p><small>2026-10-20</small></p>
+<p>So far we've been designing tables. This page is about running them in production: choosing a capacity mode, protecting data, going multi-region, and getting data out for analytics without hurting the live table.</p>
+<p>Four ideas run through it. <strong>Capacity modes:</strong> on-demand needs no planning and scales instantly, while provisioned with auto scaling is cheaper for steady, predictable traffic, and we can switch between them. <strong>Backups:</strong> point-in-time recovery restores to any second in the last 35 days, on-demand backups are kept until we delete them, and a restore always creates a <em>new</em> table. <strong>Global tables</strong> replicate a table across regions, active-active; concurrent writes to the same item resolve as last-writer-wins, so we route each item's writes to one home region when that matters. And <strong>analytics belongs elsewhere</strong>: export to S3 (which uses no table capacity) and query with Athena, or use zero-ETL to Redshift or OpenSearch, rather than running reporting Scans against the live table.</p>
+<p>DynamoDB Local doesn't support most of these APIs, so the demos make the real calls, show that they fail locally, and then simulate the behaviour.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>You'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>38</td>
+<td><a href="#38--capacity-modes-on-demand-vs-provisioned">Capacity modes</a></td>
+<td>Sizing read/write units; switching modes; auto scaling</td>
+</tr>
+<tr>
+<td>39</td>
+<td><a href="#39--point-in-time-recovery--backups">PITR &amp; backups</a></td>
+<td>Enabling PITR, on-demand backups, restore-to-new-table</td>
+</tr>
+<tr>
+<td>40</td>
+<td><a href="#40--global-tables-multi-region">Global tables</a></td>
+<td>Adding replicas; last-writer-wins and how to avoid losing writes</td>
+</tr>
+<tr>
+<td>41</td>
+<td><a href="#41--analytics-outside-dynamodb">Analytics outside DynamoDB</a></td>
+<td>Export to S3 format; querying the export instead of the table</td>
+</tr>
+</tbody>
+</table>
+<h2 id="38--capacity-modes-on-demand-vs-provisioned">38 · Capacity modes: on-demand vs provisioned</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/08-operations/38-capacity-modes/38-capacity-modes.py">38-capacity-modes.py</a> · run with <code>just run 38</code></p>
+<h3 id="problem">Problem</h3>
+<p>DynamoDB bills for throughput in one of two ways. Pick the wrong one and we either overpay a lot, or get throttled when traffic spikes.</p>
+<h3 id="pattern">Pattern</h3>
+<p>The rule of thumb is: <strong>start on on-demand, and move to provisioned + auto scaling once traffic is steady and predictable.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>You pay for</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>On-demand (<code>PAY_PER_REQUEST</code>)</td>
+<td>each request (RRU / WRU)</td>
+<td>new apps, spiky or unknown traffic, dev/test, low volume</td>
+</tr>
+<tr>
+<td>Provisioned + auto scaling</td>
+<td>capacity per hour, used or not</td>
+<td>steady, predictable traffic at scale</td>
+</tr>
+<tr>
+<td>Provisioned + reserved capacity</td>
+<td>1- or 3-year commitment</td>
+<td>large, stable baseline</td>
+</tr>
+</tbody>
+</table>
+<p>The capacity-unit maths is the same in both modes:</p>
+<ul>
+<li><strong>1 RCU</strong> = 1 strongly consistent read/sec of up to 4 KB, <em>or</em> 2 eventually consistent reads.</li>
+<li><strong>1 WCU</strong> = 1 write/sec of up to 1 KB.</li>
+<li>Transactions cost <strong>2x</strong>. Sizes round <strong>up</strong>, so a 1.1 KB write is 2 WCU.</li>
+</ul>
+<p>For example, with 3 KB items, 500 reads/s and 100 writes/s, we need 500 RCU for strong reads (250 for eventual) and 300 WCU.</p>
+<p>Auto scaling uses a separate service, Application Auto Scaling, with a target-tracking policy (e.g. keep utilisation at 70%).</p>
+<h3 id="in-practice">In practice</h3>
+<p>The script sizes the table, switches it to provisioned, prints the auto scaling setup (DynamoDB Local doesn't have Application Auto Scaling, so it's printed rather than executed), and switches back:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">rcu</span><span class="p">(</span><span class="n">item_kb</span><span class="p">,</span> <span class="n">reads_per_sec</span><span class="p">,</span> <span class="n">consistent</span><span class="o">=</span><span class="kc">True</span><span class="p">):</span>
+    <span class="n">units</span> <span class="o">=</span> <span class="o">-</span><span class="p">(</span><span class="o">-</span><span class="n">item_kb</span> <span class="o">//</span> <span class="mi">4</span><span class="p">)</span>  <span class="c1"># ceil</span>
+    <span class="k">return</span> <span class="n">units</span> <span class="o">*</span> <span class="n">reads_per_sec</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="k">if</span> <span class="n">consistent</span> <span class="k">else</span> <span class="mf">0.5</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">wcu</span><span class="p">(</span><span class="n">item_kb</span><span class="p">,</span> <span class="n">writes_per_sec</span><span class="p">):</span>
+    <span class="k">return</span> <span class="o">-</span><span class="p">(</span><span class="o">-</span><span class="n">item_kb</span> <span class="o">//</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="n">writes_per_sec</span>
+
+
+<span class="n">client</span><span class="o">.</span><span class="n">update_table</span><span class="p">(</span>
+    <span class="n">TableName</span><span class="o">=</span><span class="n">TABLE</span><span class="p">,</span>
+    <span class="n">BillingMode</span><span class="o">=</span><span class="s2">&quot;PROVISIONED&quot;</span><span class="p">,</span>
+    <span class="n">ProvisionedThroughput</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;ReadCapacityUnits&quot;</span><span class="p">:</span> <span class="mi">250</span><span class="p">,</span> <span class="s2">&quot;WriteCapacityUnits&quot;</span><span class="p">:</span> <span class="mi">300</span><span class="p">},</span>
+<span class="p">)</span>
+<span class="o">...</span>
+<span class="n">client</span><span class="o">.</span><span class="n">update_table</span><span class="p">(</span><span class="n">TableName</span><span class="o">=</span><span class="n">TABLE</span><span class="p">,</span> <span class="n">BillingMode</span><span class="o">=</span><span class="s2">&quot;PAY_PER_REQUEST&quot;</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>=== Start: on-demand ===
+{
+  &quot;BillingMode&quot;: &quot;PAY_PER_REQUEST&quot;,
+  &quot;ProvisionedThroughput&quot;: {
+    &quot;ReadCapacityUnits&quot;: 0,
+    &quot;WriteCapacityUnits&quot;: 0
+  }
+}
+
+=== Sizing for 3 KB items, 500 reads/s, 100 writes/s ===
+{
+  &quot;RCU (strong)&quot;: 500,
+  &quot;RCU (eventual)&quot;: 250.0,
+  &quot;WCU&quot;: 300
+}
+
+&gt;&gt;&gt; UpdateTable p38-capacity-modes
+
+=== After switching to provisioned ===
+{
+  &quot;BillingMode&quot;: &quot;PROVISIONED&quot;,
+  &quot;ProvisionedThroughput&quot;: {
+    &quot;ReadCapacityUnits&quot;: 250,
+    &quot;WriteCapacityUnits&quot;: 300
+  }
+}
+
+=== Auto scaling setup (AWS only, not executed) ===
+{
+  &quot;register_scalable_target&quot;: {
+    &quot;ServiceNamespace&quot;: &quot;dynamodb&quot;,
+    &quot;ResourceId&quot;: &quot;table/p38-capacity-modes&quot;,
+    &quot;ScalableDimension&quot;: &quot;dynamodb:table:WriteCapacityUnits&quot;,
+    &quot;MinCapacity&quot;: 50,
+    &quot;MaxCapacity&quot;: 1000
+  },
+  &quot;put_scaling_policy&quot;: {
+    &quot;PolicyType&quot;: &quot;TargetTrackingScaling&quot;,
+    &quot;TargetTrackingScalingPolicyConfiguration&quot;: {
+      &quot;TargetValue&quot;: 70.0,
+      &quot;PredefinedMetricSpecification&quot;: {
+        &quot;PredefinedMetricType&quot;: &quot;DynamoDBWriteCapacityUtilization&quot;
+      }
+    }
+  }
+}
+
+&gt;&gt;&gt; UpdateTable p38-capacity-modes
+
+=== Back to on-demand ===
+{
+  &quot;BillingMode&quot;: &quot;PAY_PER_REQUEST&quot;,
+  ...
+}
+</code></pre></div>
+<p>A 3 KB item rounds up to one 4 KB read unit, so 500 strong reads/s is 500 RCU, and half that for eventual reads. On the write side it rounds up to three 1 KB units, so 100 writes/s is 300 WCU. The switch between modes is a single <code>UpdateTable</code> call in each direction.</p>
+<h3 id="why">Why</h3>
+<ul>
+<li><strong>On-demand</strong> needs no capacity planning, never throttles because of "too little provisioned", and costs nothing when idle.</li>
+<li><strong>Provisioned</strong> is roughly 5–7x cheaper per request at sustained utilisation.</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<ul>
+<li>On-demand gets expensive at high, steady volume.</li>
+<li>Provisioned auto scaling reacts in minutes, not seconds. A sudden spike can throttle before it scales. Burst capacity (up to 5 minutes of unused capacity) helps a little.</li>
+<li>On-demand still has limits. A new on-demand table instantly handles up to about 2x its previous peak, and can scale further over time. We can also set a maximum throughput per table as a cost guard.</li>
+</ul>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li>Per-partition limits apply in both modes: about <strong>3,000 RCU / 1,000 WCU per partition key</strong>. A hot key throttles no matter how much capacity the table has (<a href="../07-performance-and-scale/#34--high-cardinality-partition-keys">34</a>, <a href="../07-performance-and-scale/#35--write-sharding">35</a>).</li>
+<li>GSIs have their own capacity in provisioned mode. An under-provisioned GSI throttles writes to the <strong>base table</strong>.</li>
+<li>We can only switch modes a limited number of times per 24 hours.</li>
+<li>Look at <code>ConsumedCapacity</code> (<code>ReturnConsumedCapacity="TOTAL"</code>) to measure real costs before choosing (<a href="../03-querying/#13--filter-expressions-dont-reduce-cost">13</a>).</li>
+</ul>
+<h2 id="39--point-in-time-recovery--backups">39 · Point-in-time recovery &amp; backups</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/08-operations/39-pitr-backups/39-pitr-backups.py">39-pitr-backups.py</a> · run with <code>just run 39</code></p>
+<h3 id="problem_1">Problem</h3>
+<p>A bad deploy, a buggy migration or a fat-fingered script overwrites or deletes data. DynamoDB replicates for durability, but it faithfully replicates our mistakes too. We need a way back.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We use both kinds of backup, and possibly AWS Backup on top:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>What it is</th>
+<th>Use for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Point-in-time recovery (PITR)</strong></td>
+<td>continuous backup; restore to any second in the last 1–35 days</td>
+<td>accidental writes/deletes, bad deploys</td>
+</tr>
+<tr>
+<td><strong>On-demand backup</strong></td>
+<td>named full snapshot, kept until deleted</td>
+<td>before migrations, compliance, long retention</td>
+</tr>
+<tr>
+<td><strong>AWS Backup</strong></td>
+<td>schedules, retention rules, cross-account/region copies</td>
+<td>org-wide backup policy</td>
+</tr>
+</tbody>
+</table>
+<p>In AWS, the calls look like this:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">update_continuous_backups</span><span class="p">(</span>
+    <span class="n">TableName</span><span class="o">=</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span>
+    <span class="n">PointInTimeRecoverySpecification</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PointInTimeRecoveryEnabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;RecoveryPeriodInDays&quot;</span><span class="p">:</span> <span class="mi">35</span><span class="p">},</span>
+<span class="p">)</span>
+<span class="n">client</span><span class="o">.</span><span class="n">create_backup</span><span class="p">(</span><span class="n">TableName</span><span class="o">=</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span> <span class="n">BackupName</span><span class="o">=</span><span class="s2">&quot;before-migration&quot;</span><span class="p">)</span>
+<span class="n">client</span><span class="o">.</span><span class="n">restore_table_to_point_in_time</span><span class="p">(</span>
+    <span class="n">SourceTableName</span><span class="o">=</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span> <span class="n">TargetTableName</span><span class="o">=</span><span class="s2">&quot;orders-restored&quot;</span><span class="p">,</span>
+    <span class="n">RestoreDateTime</span><span class="o">=</span><span class="n">datetime</span><span class="p">(</span><span class="mi">2026</span><span class="p">,</span> <span class="mi">10</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">9</span><span class="p">,</span> <span class="mi">55</span><span class="p">),</span>
+<span class="p">)</span>
+</code></pre></div>
+<h3 id="in-practice_1">In practice</h3>
+<p><strong>DynamoDB Local doesn't implement any of the backup APIs</strong>, so this one is simulated. The script makes the real calls anyway, so we can see them fail, and then uses a scan-and-write-back snapshot as a stand-in:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">attempt</span><span class="p">(</span><span class="s2">&quot;Enable PITR&quot;</span><span class="p">,</span> <span class="n">client</span><span class="o">.</span><span class="n">update_continuous_backups</span><span class="p">,</span> <span class="n">TableName</span><span class="o">=</span><span class="n">TABLE</span><span class="p">,</span>
+        <span class="n">PointInTimeRecoverySpecification</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PointInTimeRecoveryEnabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;RecoveryPeriodInDays&quot;</span><span class="p">:</span> <span class="mi">35</span><span class="p">})</span>
+<span class="n">backup</span> <span class="o">=</span> <span class="n">attempt</span><span class="p">(</span><span class="s2">&quot;Create on-demand backup&quot;</span><span class="p">,</span> <span class="n">client</span><span class="o">.</span><span class="n">create_backup</span><span class="p">,</span> <span class="n">TableName</span><span class="o">=</span><span class="n">TABLE</span><span class="p">,</span> <span class="n">BackupName</span><span class="o">=</span><span class="s2">&quot;before-migration&quot;</span><span class="p">)</span>
+
+<span class="n">local_snapshot</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">scan</span><span class="p">()[</span><span class="s2">&quot;Items&quot;</span><span class="p">]</span>  <span class="c1"># local stand-in for a backup</span>
+
+<span class="c1"># Oops - a bad deploy zeroes the balance.</span>
+<span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;ACCOUNT#1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">},</span> <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET balance = :z&quot;</span><span class="p">,</span> <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:z&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">})</span>
+
+<span class="c1"># Restores ALWAYS create a NEW table; you then swap traffic or copy items back.</span>
+<span class="n">attempt</span><span class="p">(</span><span class="s2">&quot;Restore to latest restorable time&quot;</span><span class="p">,</span> <span class="n">client</span><span class="o">.</span><span class="n">restore_table_to_point_in_time</span><span class="p">,</span>
+        <span class="n">SourceTableName</span><span class="o">=</span><span class="n">TABLE</span><span class="p">,</span> <span class="n">TargetTableName</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">TABLE</span><span class="si">}</span><span class="s2">-restored&quot;</span><span class="p">,</span> <span class="n">UseLatestRestorableTime</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p39-pitr-backups
+    item:       {PK: &#39;ACCOUNT#1&#39;, SK: &#39;META&#39;, balance: 100}
+
+&gt;&gt;&gt; UpdateContinuousBackups p39-pitr-backups
+
+=== Enable PITR: not supported by DynamoDB Local ===
+&quot;An unknown operation was requested.&quot;
+
+&gt;&gt;&gt; CreateBackup p39-pitr-backups
+
+=== Create on-demand backup: not supported by DynamoDB Local ===
+&quot;An unknown operation was requested.&quot;
+
+&gt;&gt;&gt; Scan p39-pitr-backups
+
+&gt;&gt;&gt; UpdateItem p39-pitr-backups
+    key:        {PK: &#39;ACCOUNT#1&#39;, SK: &#39;META&#39;}
+    update:     SET balance = 0
+
+=== After bad deploy ===
+{
+  &quot;balance&quot;: 0,
+  &quot;SK&quot;: &quot;META&quot;,
+  &quot;PK&quot;: &quot;ACCOUNT#1&quot;
+}
+
+&gt;&gt;&gt; RestoreTableToPointInTime
+
+=== Restore to latest restorable time: not supported by DynamoDB Local ===
+&quot;An unknown operation was requested.&quot;
+
+&gt;&gt;&gt; BatchWriteItem
+    p39-pitr-backups: 1 puts, 0 deletes
+
+=== Local stand-in: restored from snapshot ===
+{
+  &quot;SK&quot;: &quot;META&quot;,
+  &quot;balance&quot;: 100,
+  &quot;PK&quot;: &quot;ACCOUNT#1&quot;
+}
+</code></pre></div>
+<p>The story is the same one we'd live through in AWS: an account with a balance of 100, a bad deploy that zeroes it, and a restore that brings the 100 back. Locally the restore is a <code>BatchWriteItem</code> of the snapshot. In AWS it would be a new <code>orders-restored</code> table that we copy from or swap to.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li><strong>PITR is the cheapest insurance we can buy.</strong> Turn it on for every table that matters, ideally by default in IaC.</li>
+<li>Backups have <strong>no performance impact</strong> and use no table capacity.</li>
+</ul>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<ul>
+<li><strong>A restore always creates a new table.</strong> We then either point the app at it, or copy the damaged items back. A partial copy-back is usually better, because writes made after the incident are kept.</li>
+<li>Restores take minutes to hours, depending on table size.</li>
+<li>The restored table does <strong>not</strong> keep everything. Auto scaling policies, TTL settings, IAM policies, CloudWatch alarms, tags and stream settings must all be set again. GSIs and LSIs can be included.</li>
+<li>PITR is billed per GB-month of table size.</li>
+</ul>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li>Deleting a table with PITR keeps a system backup for 35 days. Enable <strong>deletion protection</strong> (<code>DeletionProtectionEnabled=True</code>) as well.</li>
+<li>TTL deletes are also "real" deletes. PITR can bring back expired items if we restore to an earlier time (<a href="../06-lifecycle-and-events/#30--ttl-for-expiry">30</a>).</li>
+<li>For long-term archival or analytics, use Export to S3 instead (<a href="#41--analytics-outside-dynamodb">41</a>). It also needs PITR enabled.</li>
+</ul>
+<h2 id="40--global-tables-multi-region">40 · Global tables (multi-region)</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/08-operations/40-global-tables/40-global-tables.py">40-global-tables.py</a> · run with <code>just run 40</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>Our users are spread across continents, and cross-region latency adds 100+ ms per request. Or we need to survive a whole AWS region going down. A single-region table can't do either.</p>
+<h3 id="pattern_2">Pattern</h3>
+<p>We make the table a <strong>global table</strong>: a fully managed replica in every chosen region. Each replica accepts reads <strong>and writes</strong> (active-active). DynamoDB replicates changes between regions asynchronously, usually in about a second.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">update_table</span><span class="p">(</span>
+    <span class="n">TableName</span><span class="o">=</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span>
+    <span class="n">ReplicaUpdates</span><span class="o">=</span><span class="p">[{</span><span class="s2">&quot;Create&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;RegionName&quot;</span><span class="p">:</span> <span class="s2">&quot;eu-west-1&quot;</span><span class="p">}}],</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>Conflicts, where the same item is written in two regions before replication catches up, are resolved by <strong>last writer wins</strong>, using an internal timestamp. The losing write is discarded with no error.</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant US as us-east-1
+    participant EU as eu-west-1
+    US-&gt;&gt;US: write ORDER#o1 = CANCELLED
+    EU-&gt;&gt;EU: write ORDER#o1 = SHIPPED (later timestamp)
+    US--&gt;&gt;EU: replicate CANCELLED
+    Note over EU: older timestamp, dropped
+    EU--&gt;&gt;US: replicate SHIPPED
+    Note over US,EU: both regions converge on SHIPPED
+</pre>
+
+<h3 id="in-practice_2">In practice</h3>
+<p>DynamoDB Local doesn't support replicas, so the script simulates two regions with dicts. Each write is stamped with a timestamp and queued for asynchronous replication, and the replicator only applies a write if it's newer than what the target already has:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">replicate</span><span class="p">():</span>
+    <span class="k">while</span> <span class="n">replication_log</span><span class="p">:</span>
+        <span class="n">target</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">item</span> <span class="o">=</span> <span class="n">replication_log</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">current</span> <span class="o">=</span> <span class="n">regions</span><span class="p">[</span><span class="n">target</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">current</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">item</span><span class="p">[</span><span class="s2">&quot;_ts&quot;</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">current</span><span class="p">[</span><span class="s2">&quot;_ts&quot;</span><span class="p">]:</span>
+            <span class="n">regions</span><span class="p">[</span><span class="n">target</span><span class="p">][</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">item</span>  <span class="c1"># last writer wins</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  </span><span class="si">{</span><span class="n">target</span><span class="si">}</span><span class="s2">: dropped older write from </span><span class="si">{</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;_region&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">item</span><span class="p">[</span><span class="s1">&#39;status&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+</code></pre></div>
+<p>It then shows three things: a write in one region becoming visible in the other after replication, a conflict, and the fix.</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; UpdateTable p40-global-tables
+
+=== Add replica: not supported by DynamoDB Local ===
+&quot;Nothing to update&quot;
+
+=== Normal case: write in one region, read anywhere (after replication) ===
+us-east-1  wrote ORDER#o1: PLACED
+
+=== Before replication (eu-west-1 is stale) ===
+{
+  &quot;us-east-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;PLACED&quot;
+  },
+  &quot;eu-west-1&quot;: {}
+}
+
+=== After replication ===
+{
+  &quot;us-east-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;PLACED&quot;
+  },
+  &quot;eu-west-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;PLACED&quot;
+  }
+}
+
+=== Conflict: both regions update the same item before replicating ===
+us-east-1  wrote ORDER#o1: CANCELLED
+eu-west-1  wrote ORDER#o1: SHIPPED
+  eu-west-1: dropped older write from us-east-1 (CANCELLED)
+
+=== Converged (CANCELLED was silently lost!) ===
+{
+  &quot;us-east-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;SHIPPED&quot;
+  },
+  &quot;eu-west-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;SHIPPED&quot;
+  }
+}
+
+=== Mitigation: give each item a home region and only write there ===
+eu-west-1  wrote ORDER#o2: PLACED
+eu-west-1  wrote ORDER#o2: PAID
+
+=== No conflicts possible ===
+{
+  &quot;us-east-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;SHIPPED&quot;,
+    &quot;ORDER#o2&quot;: &quot;PAID&quot;
+  },
+  &quot;eu-west-1&quot;: {
+    &quot;ORDER#o1&quot;: &quot;SHIPPED&quot;,
+    &quot;ORDER#o2&quot;: &quot;PAID&quot;
+  }
+}
+</code></pre></div>
+<p>The conflict is the scary part. A customer cancelled the order in <code>us-east-1</code>, a warehouse shipped it in <code>eu-west-1</code> a moment later, and both regions converge on <code>SHIPPED</code>. The cancellation is gone, and nobody got an error. Once <code>ORDER#o2</code> has a home region and is only ever written there, its writes are applied in order and conflicts can't happen.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li><strong>Low latency.</strong> Users read and write in their nearest region.</li>
+<li><strong>High availability.</strong> 99.999% SLA. If a region fails, we route traffic to another.</li>
+<li><strong>Fully managed.</strong> No replication code to write or run.</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li><strong>Cross-region reads are eventually consistent.</strong> Strong reads only see writes made in the same region.</li>
+<li><strong>Last-writer-wins can lose data.</strong> Avoid concurrent writes to one item from several regions by giving items a home region ("write locally, read globally"). Conditional writes and transactions are only checked in the region where they run.</li>
+<li><strong>Cost.</strong> We pay for replicated writes in every region, plus cross-region data transfer.</li>
+<li><strong>Multi-Region strong consistency (MRSC)</strong> is available as an option. Writes are synchronously replicated across 3 regions, which removes the conflicts, at the cost of higher write latency and some limits (e.g. no transactions).</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>All replicas must have the same key schema, GSIs, and TTL and stream settings. Changes are made once and applied everywhere.</li>
+<li>Counters (<a href="../05-consistency/#24--atomic-counters">24</a>) and optimistic locking (<a href="../05-consistency/#23--optimistic-locking">23</a>) are only safe if all writes for an item go to one region.</li>
+<li>TTL deletes (<a href="../06-lifecycle-and-events/#30--ttl-for-expiry">30</a>) replicate too, and consume write capacity in the replica regions.</li>
+<li>Use the current version (2019.11.21). The legacy 2017 version needs a manual migration.</li>
+</ul>
+<h2 id="41--analytics-outside-dynamodb">41 · Analytics outside DynamoDB</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/08-operations/41-analytics-export/41-analytics-export.py">41-analytics-export.py</a> · run with <code>just run 41</code></p>
+<h3 id="problem_3">Problem</h3>
+<p>"Revenue by country last quarter." "Top 100 customers." Questions like these need to read the <strong>whole table</strong> and group or sort by attributes that aren't keys. In DynamoDB that means a full Scan, which is slow, expensive, and eats the capacity our live traffic needs (<a href="../03-querying/#12--avoid-scan-use-parallel-scan-for-batch-jobs">12</a>).</p>
+<h3 id="pattern_3">Pattern</h3>
+<p><strong>DynamoDB serves the application. Analytics runs on a copy.</strong> There are three common ways to get that copy:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>How</th>
+<th>Freshness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Export to S3</strong> + Athena / Glue / Spark</td>
+<td><code>ExportTableToPointInTime</code>, full or incremental, in DynamoDB JSON or Ion</td>
+<td>snapshot (minutes–hours)</td>
+</tr>
+<tr>
+<td><strong>Zero-ETL to Redshift / OpenSearch</strong></td>
+<td>managed integration, no pipeline code</td>
+<td>near real-time</td>
+</tr>
+<tr>
+<td><strong>Streams → Firehose → S3</strong></td>
+<td>change events into a data lake (<a href="../06-lifecycle-and-events/#31--dynamodb-streams--cdc">31</a>)</td>
+<td>near real-time</td>
+</tr>
+</tbody>
+</table>
+<p>The export is a single call:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">export_table_to_point_in_time</span><span class="p">(</span>
+    <span class="n">TableArn</span><span class="o">=</span><span class="n">table_arn</span><span class="p">,</span>
+    <span class="n">S3Bucket</span><span class="o">=</span><span class="s2">&quot;my-analytics-bucket&quot;</span><span class="p">,</span>
+    <span class="n">S3Prefix</span><span class="o">=</span><span class="s2">&quot;exports/orders&quot;</span><span class="p">,</span>
+    <span class="n">ExportFormat</span><span class="o">=</span><span class="s2">&quot;DYNAMODB_JSON&quot;</span><span class="p">,</span>        <span class="c1"># or &quot;ION&quot;</span>
+    <span class="n">ExportType</span><span class="o">=</span><span class="s2">&quot;INCREMENTAL_EXPORT&quot;</span><span class="p">,</span>     <span class="c1"># or &quot;FULL_EXPORT&quot; (default)</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>Then we query it in Athena:</p>
+<div class="highlight"><span class="filename">SQL</span><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">item</span><span class="p">.</span><span class="n">country</span><span class="p">.</span><span class="n">S</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">country</span><span class="p">,</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">orders</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="k">CAST</span><span class="p">(</span><span class="n">item</span><span class="p">.</span><span class="n">total</span><span class="p">.</span><span class="n">N</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">int</span><span class="p">))</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">revenue</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">orders_export</span><span class="w"> </span><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</code></pre></div>
+<h3 id="in-practice_3">In practice</h3>
+<p>DynamoDB Local has no export API, so this one is simulated too. The script seeds 500 orders, tries the real export, and then does a 4-segment parallel scan into gzipped files in the same <code>{"Item": {...}}</code> line format a real export writes. Finally it runs the GROUP BY in Python, reading only the files:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">export_segment</span><span class="p">(</span><span class="n">segment</span><span class="p">):</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">export_dir</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">&quot;segment-</span><span class="si">{</span><span class="n">segment</span><span class="si">}</span><span class="s2">.json.gz&quot;</span>
+    <span class="n">kwargs</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">TableName</span><span class="o">=</span><span class="n">TABLE</span><span class="p">,</span> <span class="n">Segment</span><span class="o">=</span><span class="n">segment</span><span class="p">,</span> <span class="n">TotalSegments</span><span class="o">=</span><span class="n">SEGMENTS</span><span class="p">)</span>
+    <span class="k">with</span> <span class="n">gzip</span><span class="o">.</span><span class="n">open</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="s2">&quot;wt&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+            <span class="n">resp</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">scan</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>  <span class="c1"># clients are thread-safe; resource objects are not</span>
+            <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;Items&quot;</span><span class="p">]:</span>
+                <span class="c1"># same line format as a real DYNAMODB_JSON export</span>
+                <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span><span class="s2">&quot;Item&quot;</span><span class="p">:</span> <span class="p">{</span><span class="n">k</span><span class="p">:</span> <span class="n">ser</span><span class="o">.</span><span class="n">serialize</span><span class="p">(</span><span class="n">v</span><span class="p">)</span> <span class="k">for</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">item</span><span class="o">.</span><span class="n">items</span><span class="p">()}},</span> <span class="n">default</span><span class="o">=</span><span class="nb">str</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="s2">&quot;LastEvaluatedKey&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">resp</span><span class="p">:</span>
+                <span class="k">break</span>
+            <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;ExclusiveStartKey&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;LastEvaluatedKey&quot;</span><span class="p">]</span>
+
+
+<span class="k">with</span> <span class="n">ThreadPoolExecutor</span><span class="p">(</span><span class="n">SEGMENTS</span><span class="p">)</span> <span class="k">as</span> <span class="n">pool</span><span class="p">:</span>
+    <span class="n">counts</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">pool</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">export_segment</span><span class="p">,</span> <span class="nb">range</span><span class="p">(</span><span class="n">SEGMENTS</span><span class="p">)))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; BatchWriteItem
+    p41-analytics-export: 25 puts, 0 deletes
+    ... (+17 more BatchWriteItem calls not shown)
+
+&gt;&gt;&gt; ExportTableToPointInTime
+
+=== ExportTableToPointInTime: not supported by DynamoDB Local ===
+&quot;UnknownOperationException&quot;
+
+&gt;&gt;&gt; Scan p41-analytics-export
+    Segment:    0
+    TotalSegments: 4
+
+&gt;&gt;&gt; Scan p41-analytics-export
+    Segment:    1
+    TotalSegments: 4
+
+&gt;&gt;&gt; Scan p41-analytics-export
+    Segment:    2
+    TotalSegments: 4
+    ... (+1 more Scan calls not shown)
+
+=== Exported ===
+{
+  &quot;dir&quot;: &quot;.../p41-export-gbtkfbg8/data&quot;,
+  &quot;items per segment&quot;: [
+    142,
+    122,
+    114,
+    122
+  ]
+}
+
+=== Revenue by country (computed off the table) ===
+{
+  &quot;DE&quot;: {
+    &quot;orders&quot;: 127,
+    &quot;revenue&quot;: 13240
+  },
+  &quot;FR&quot;: {
+    &quot;orders&quot;: 125,
+    &quot;revenue&quot;: 11535
+  },
+  &quot;UK&quot;: {
+    &quot;orders&quot;: 120,
+    &quot;revenue&quot;: 11979
+  },
+  &quot;US&quot;: {
+    &quot;orders&quot;: 128,
+    &quot;revenue&quot;: 12867
+  }
+}
+</code></pre></div>
+<p>The four segments split the 500 items roughly evenly, and each one is scanned in parallel. Once the export exists, the revenue-by-country report never touches the table again. We could re-run it, change it, or add a <code>JOIN</code>, and DynamoDB would never notice.</p>
+<h3 id="why_3">Why</h3>
+<ul>
+<li><strong>Exports use no table capacity.</strong> They read from PITR backups, not the live table.</li>
+<li><strong>It's the right tool.</strong> SQL engines do joins, GROUP BY and ad-hoc filters; DynamoDB doesn't.</li>
+<li><strong>It's cheap.</strong> S3 storage and per-query Athena pricing beat scanning the table again and again.</li>
+</ul>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li><strong>The data is a little stale.</strong> A snapshot, or seconds to minutes behind with zero-ETL or streams.</li>
+<li>It's another system to manage: a Glue catalog, partitions, and schema drift from DynamoDB's schemaless items.</li>
+<li>Single-table designs (<a href="../02-modelling/#04--single-table-design">04</a>) export as one mixed table. We'll need views per entity type (<code>WHERE item.type.S = 'Order'</code>).</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li>Export needs <strong>PITR enabled</strong> on the table (<a href="#39--point-in-time-recovery--backups">39</a>).</li>
+<li>Numbers are exported as strings (<code>{"N": "42"}</code>), so cast them in SQL.</li>
+<li>If we <em>must</em> scan the live table (a small table, or a one-off job), use a parallel scan from a client (boto3 clients are thread-safe, resource objects aren't), consider a rate limiter, and prefer eventually consistent reads.</li>
+</ul>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/07-performance-and-scale/">07 - Performance &amp; scale</a> | <a href="/posts/08-dynamodb-patterns/09-anti-patterns/">09 - What not to do</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 - Item size &amp; large data</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>04 - Item size &amp; large data</h1>
+<p><small>2026-10-20</small></p>
+<p>A DynamoDB item can be at most <strong>400 KB</strong>, and we pay per 4 KB read and per 1 KB written, every time we touch it. Item size is therefore both a hard limit and a cost lever. This page covers keeping items small, and what to do when the data really is big.</p>
+<p><strong>Small items are cheap items.</strong> A 40 KB item costs 40 write units for a one-byte change, and an unbounded list inside an item makes every append more expensive until it hits the limit. So we <strong>split by access pattern</strong> (vertical partitioning): data that's read or written separately, such as a summary, details and reviews, becomes separate items under the same partition key. What we can't split, we <strong>compress</strong>, since large text or JSON attributes gzip well and fit in a Binary attribute. And <strong>big blobs belong in S3</strong>: the object goes in S3, while DynamoDB keeps a pointer and the metadata. Chunking a blob across items works, but it's rarely the better choice.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>What we'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>17</td>
+<td><a href="#17--keep-items-small-use-item-collections">Keep items small (item collections)</a></td>
+<td>One item per child instead of a growing list; measured read costs</td>
+</tr>
+<tr>
+<td>18</td>
+<td><a href="#18--vertical-partitioning">Vertical partitioning</a></td>
+<td>Splitting a fat entity into SUMMARY / DETAILS / ... items</td>
+</tr>
+<tr>
+<td>19</td>
+<td><a href="#19--compression">Compression</a></td>
+<td>Gzipping a large attribute into Binary</td>
+</tr>
+<tr>
+<td>20</td>
+<td><a href="#20--offload-large-items-to-s3">Offload large items to S3</a></td>
+<td>Pointer + metadata + checksum in DynamoDB, the object in S3</td>
+</tr>
+<tr>
+<td>21</td>
+<td><a href="#21--chunking">Chunking</a></td>
+<td>Splitting a blob across items with a manifest, and why S3 usually wins</td>
+</tr>
+</tbody>
+</table>
+<h2 id="17--keep-items-small-use-item-collections">17 · Keep items small (use item collections)</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/04-item-size/17-small-items-item-collections/17-small-items-item-collections.py">17-small-items-item-collections.py</a> · run with <code>just run 17</code></p>
+<h3 id="problem">Problem</h3>
+<p>It's tempting to model "a post and its comments" as one item with a <code>comments</code> list. That list grows without bound. Reading just the title then costs as much as reading every comment, and every append rewrites the whole item.</p>
+<h3 id="pattern">Pattern</h3>
+<p>We keep each item small and bounded, and model "has many" as <strong>separate items in the same partition</strong> (an <a href="../02-modelling/#04--single-table-design">item collection</a>) rather than as a list attribute:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST#p2</code></td>
+<td><code>POST</code></td>
+<td>title, comment_count</td>
+</tr>
+<tr>
+<td><code>POST#p2</code></td>
+<td><code>COMMENT#2026-10-20T10:00</code></td>
+<td>by, text</td>
+</tr>
+<tr>
+<td><code>POST#p2</code></td>
+<td><code>COMMENT#2026-10-20T10:01</code></td>
+<td>by, text</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Post only:</strong> <code>GetItem(PK, SK=POST)</code>. This stays cheap no matter how many comments there are.</li>
+<li><strong>Latest N comments:</strong> <code>Query(PK, SK begins_with COMMENT#, ScanIndexForward=False, Limit=N)</code>.</li>
+</ul>
+<h3 id="in-practice">In practice</h3>
+<p>The script builds the same post both ways with 50 comments, and asks DynamoDB what each read costs with <code>ReturnConsumedCapacity="TOTAL"</code>:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># BAD: comments appended to a list on the post item.</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST#p1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST&quot;</span><span class="p">,</span> <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="s2">&quot;comments&quot;</span><span class="p">:</span> <span class="p">[]})</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">50</span><span class="p">):</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+        <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST#p1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST&quot;</span><span class="p">},</span>
+        <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET comments = list_append(comments, :c)&quot;</span><span class="p">,</span>
+        <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:c&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;by&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;user</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="s2">&quot;Nice post! &quot;</span> <span class="o">*</span> <span class="mi">20</span><span class="p">}]},</span>
+    <span class="p">)</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST#p1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST&quot;</span><span class="p">},</span> <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">)</span>
+
+<span class="c1"># GOOD: the post is small. Each comment is its own item in the same collection.</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST&quot;</span><span class="p">,</span> <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;Hello&quot;</span><span class="p">,</span> <span class="s2">&quot;comment_count&quot;</span><span class="p">:</span> <span class="mi">50</span><span class="p">})</span>
+<span class="k">with</span> <span class="n">table</span><span class="o">.</span><span class="n">batch_writer</span><span class="p">()</span> <span class="k">as</span> <span class="n">batch</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">50</span><span class="p">):</span>
+        <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;POST#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;COMMENT#2026-10-20T10:</span><span class="si">{</span><span class="n">i</span><span class="si">:</span><span class="s2">02d</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;by&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;user</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="s2">&quot;Nice post! &quot;</span> <span class="o">*</span> <span class="mi">20</span><span class="p">})</span>
+
+<span class="c1"># Latest 5 comments, without reading the other 45</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;POST#p2&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;COMMENT#&quot;</span><span class="p">),</span>
+    <span class="n">ScanIndexForward</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">Limit</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+    <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; UpdateItem p17-small-items
+    key:        {PK: &#39;POST#p1&#39;, SK: &#39;POST&#39;}
+    update:     SET comments = list_append(comments, [{by: &#39;user0&#39;, text: &#39;Nice post! Nice post! Nice post! Nice post! Nice post! N...&#39;}])
+    ... (+47 more UpdateItem calls not shown)
+
+&gt;&gt;&gt; GetItem p17-small-items
+    key:        {PK: &#39;POST#p1&#39;, SK: &#39;POST&#39;}
+
+=== BAD: one big item - read cost for just the title ===
+{
+  &quot;TableName&quot;: &quot;p17-small-items&quot;,
+  &quot;CapacityUnits&quot;: 1.5
+}
+
+&gt;&gt;&gt; PutItem p17-small-items
+    item:       {PK: &#39;POST#p2&#39;, SK: &#39;POST&#39;, title: &#39;Hello&#39;, comment_count: 50}
+
+&gt;&gt;&gt; BatchWriteItem
+    p17-small-items: 25 puts, 0 deletes
+
+&gt;&gt;&gt; BatchWriteItem
+    p17-small-items: 25 puts, 0 deletes
+
+&gt;&gt;&gt; GetItem p17-small-items
+    key:        {PK: &#39;POST#p2&#39;, SK: &#39;POST&#39;}
+
+=== GOOD: post only - read cost ===
+{
+  &quot;TableName&quot;: &quot;p17-small-items&quot;,
+  &quot;CapacityUnits&quot;: 0.5
+}
+
+&gt;&gt;&gt; Query p17-small-items
+    key:        (PK = &#39;POST#p2&#39; AND begins_with(SK, &#39;COMMENT#&#39;))
+    Limit:      5
+    ScanIndexForward: False
+
+=== GOOD: latest 5 comments ===
+{
+  &quot;count&quot;: 5,
+  &quot;consumed&quot;: {
+    &quot;TableName&quot;: &quot;p17-small-items&quot;,
+    &quot;CapacityUnits&quot;: 0.5
+  },
+  &quot;first&quot;: &quot;COMMENT#2026-10-20T10:49&quot;
+}
+</code></pre></div>
+<p>With only 50 short comments, reading the title from the big item already costs 3x as much as reading the small post item, and that gap grows with every comment. On the item-collection side, the latest 5 comments cost the same 0.5 units, and the first one back is the newest (<code>10:49</code>).</p>
+<h3 id="why">Why</h3>
+<ul>
+<li><strong>Cost.</strong> Reads are billed per 4 KB and writes per 1 KB of the <em>whole item</em>. Updating one field on a 300 KB item costs 300 WCUs.</li>
+<li><strong>No 400 KB cliff.</strong> Each comment is its own item.</li>
+<li><strong>Paging.</strong> We can <a href="../03-querying/#14--pagination-with-cursors">page</a> through comment items. We can't page through a list attribute.</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<ul>
+<li>Showing a post with all its comments is now a <code>Query</code> rather than a <code>GetItem</code>. That's still one request.</li>
+<li>Counts must be kept on the parent, e.g. with <a href="../05-consistency/#24--atomic-counters">atomic counters</a> or <a href="../06-lifecycle-and-events/#32--streams-maintained-aggregates">Streams-maintained aggregates</a>.</li>
+</ul>
+<p>As a rule of thumb, a small list with a hard upper limit (say, 5 tags) is fine as an attribute. Anything unbounded or large should be separate items. <a href="#18--vertical-partitioning">Vertical partitioning</a> and <a href="../02-modelling/#04--single-table-design">single-table design</a> build on the same idea.</p>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li>Pass <code>ReturnConsumedCapacity="TOTAL"</code> to see what a request really costs, as the script does.</li>
+<li>Hot item collections can still hit the per-partition throughput limit (~1,000 WCU / 3,000 RCU). See <a href="../07-performance-and-scale/#35--write-sharding">write sharding</a>.</li>
+</ul>
+<h2 id="18--vertical-partitioning">18 · Vertical partitioning</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/04-item-size/18-vertical-partitioning/18-vertical-partitioning.py">18-vertical-partitioning.py</a> · run with <code>just run 18</code></p>
+<h3 id="problem_1">Problem</h3>
+<p>One logical entity has grown into a fat item: summary fields, a long description, specs, reviews, stock. Two things go wrong:</p>
+<ul>
+<li><strong>Reads are expensive.</strong> A listing page that needs only the name and price still pays for the whole item, because reads are billed per 4 KB.</li>
+<li><strong>Writes are expensive.</strong> Updating one counter (<code>stock</code>) is billed on the <strong>full item size</strong>, because writes are billed per 1 KB of the item.</li>
+</ul>
+<p>It also creeps towards the 400 KB limit.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We split the entity into several items under the <strong>same partition key</strong>, grouped by how they're accessed:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>attributes</th>
+<th>Access</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PRODUCT#p2</code></td>
+<td><code>SUMMARY</code></td>
+<td>name, price</td>
+<td>listing pages (hot)</td>
+</tr>
+<tr>
+<td><code>PRODUCT#p2</code></td>
+<td><code>INVENTORY</code></td>
+<td>stock</td>
+<td>changes often</td>
+</tr>
+<tr>
+<td><code>PRODUCT#p2</code></td>
+<td><code>DETAILS</code></td>
+<td>description, specs</td>
+<td>product page only</td>
+</tr>
+<tr>
+<td><code>PRODUCT#p2</code></td>
+<td><code>REVIEW#u1</code></td>
+<td>user, text</td>
+<td>paged, unbounded</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Listing:</strong> <code>GetItem SK=SUMMARY</code>. Small and cheap.</li>
+<li><strong>Stock change:</strong> <code>UpdateItem SK=INVENTORY</code>. Billed on a tiny item.</li>
+<li><strong>Product page:</strong> <code>Query PK=PRODUCT#p2</code>, which returns all the parts in one request. Or <code>BatchGetItem</code> for exactly the parts we need.</li>
+</ul>
+<h3 id="in-practice_1">In practice</h3>
+<p>The script stores a ~52 KB kettle once as a single <code>ALL</code> item, and once split into parts, then compares the consumed capacity of the listing read and of a stock change:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">fat</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;ALL&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Kettle&quot;</span><span class="p">,</span> <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span> <span class="s2">&quot;stock&quot;</span><span class="p">:</span> <span class="mi">12</span><span class="p">,</span>
+    <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="s2">&quot;x&quot;</span> <span class="o">*</span> <span class="mi">20_000</span><span class="p">,</span>
+    <span class="s2">&quot;specs&quot;</span><span class="p">:</span> <span class="p">{</span><span class="sa">f</span><span class="s2">&quot;spec</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">:</span> <span class="s2">&quot;y&quot;</span> <span class="o">*</span> <span class="mi">100</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">)},</span>
+    <span class="s2">&quot;reviews&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;user&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;u</span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="s2">&quot;z&quot;</span> <span class="o">*</span> <span class="mi">200</span><span class="p">}</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">100</span><span class="p">)],</span>
+<span class="p">}</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="n">fat</span><span class="p">)</span>
+
+<span class="c1"># Split by access pattern: hot/small fields vs. cold/large fields, same PK.</span>
+<span class="k">with</span> <span class="n">table</span><span class="o">.</span><span class="n">batch_writer</span><span class="p">()</span> <span class="k">as</span> <span class="n">batch</span><span class="p">:</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;SUMMARY&quot;</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Kettle&quot;</span><span class="p">,</span> <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="mi">30</span><span class="p">})</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;INVENTORY&quot;</span><span class="p">,</span> <span class="s2">&quot;stock&quot;</span><span class="p">:</span> <span class="mi">12</span><span class="p">})</span>  <span class="c1"># changes often</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;DETAILS&quot;</span><span class="p">,</span> <span class="s2">&quot;description&quot;</span><span class="p">:</span> <span class="n">fat</span><span class="p">[</span><span class="s2">&quot;description&quot;</span><span class="p">],</span> <span class="s2">&quot;specs&quot;</span><span class="p">:</span> <span class="n">fat</span><span class="p">[</span><span class="s2">&quot;specs&quot;</span><span class="p">]})</span>
+    <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">fat</span><span class="p">[</span><span class="s2">&quot;reviews&quot;</span><span class="p">]:</span>
+        <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;REVIEW#</span><span class="si">{</span><span class="n">r</span><span class="p">[</span><span class="s1">&#39;user&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="o">**</span><span class="n">r</span><span class="p">})</span>
+
+<span class="c1"># Stock updates now write a tiny item instead of rewriting the whole product.</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;INVENTORY&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;ADD stock :d&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:d&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">},</span>
+    <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p18-vertical-partitioning
+    item:       {PK: &#39;PRODUCT#p1&#39;, SK: &#39;ALL&#39;, name: &#39;Kettle&#39;, price: 30, stock: 12, description: &#39;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...&#39;, specs: {spec0: &#39;yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy...&#39;, ...}, reviews: [{user: &#39;u0&#39;, text: &#39;zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz...&#39;}, ... +95]}
+
+&gt;&gt;&gt; GetItem p18-vertical-partitioning
+    key:        {PK: &#39;PRODUCT#p1&#39;, SK: &#39;ALL&#39;}
+
+=== Fat item: read units to show name + price ===
+6.5
+
+&gt;&gt;&gt; BatchWriteItem
+    p18-vertical-partitioning: 25 puts, 0 deletes
+    ... (+2 more BatchWriteItem calls not shown)
+
+&gt;&gt;&gt; GetItem p18-vertical-partitioning
+    key:        {PK: &#39;PRODUCT#p2&#39;, SK: &#39;SUMMARY&#39;}
+
+=== Split: read units for SUMMARY ===
+0.5
+
+&gt;&gt;&gt; UpdateItem p18-vertical-partitioning
+    key:        {PK: &#39;PRODUCT#p2&#39;, SK: &#39;INVENTORY&#39;}
+    update:     ADD stock -1
+
+=== Split: write units for a stock change ===
+1.0
+
+&gt;&gt;&gt; UpdateItem p18-vertical-partitioning
+    key:        {PK: &#39;PRODUCT#p1&#39;, SK: &#39;ALL&#39;}
+    update:     ADD stock -1
+
+=== Fat item: write units for the same stock change ===
+52.0
+
+&gt;&gt;&gt; Query p18-vertical-partitioning
+    key:        PK = &#39;PRODUCT#p2&#39;
+    Limit:      5
+
+=== Item collection query (first 5 by SK) ===
+[
+  &quot;DETAILS&quot;,
+  &quot;INVENTORY&quot;,
+  &quot;REVIEW#u0&quot;,
+  &quot;REVIEW#u1&quot;,
+  &quot;REVIEW#u10&quot;
+]
+
+&gt;&gt;&gt; BatchGetItem
+    p18-vertical-partitioning: 2 keys, e.g. {PK: &#39;PRODUCT#p2&#39;, SK: &#39;SUMMARY&#39;}
+
+=== Summary + inventory via BatchGetItem ===
+[
+  &quot;INVENTORY&quot;,
+  &quot;SUMMARY&quot;
+]
+</code></pre></div>
+<p>The listing read drops from 6.5 to 0.5 read units, and the stock change from <strong>52 to 1</strong> write unit, for exactly the same logical operation. The item collection query also shows why sort-key naming matters: the parts come back in SK order (<code>DETAILS</code>, <code>INVENTORY</code>, <code>REVIEW#...</code>). The reviews sort as strings (<code>u10</code> before <code>u2</code>), and <code>SUMMARY</code> sorts after all of them.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li>We pay only for the bytes each access pattern needs.</li>
+<li>Hot, frequently updated fields don't rewrite cold, large ones.</li>
+<li>Unbounded parts (reviews) become separate items and can't hit the 400 KB limit.</li>
+</ul>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<ul>
+<li>Reading the whole entity takes a <code>Query</code> (or several gets) instead of one <code>GetItem</code>.</li>
+<li>Changes that span parts need a <a href="../05-consistency/#25--transactions">transaction</a> to stay atomic.</li>
+<li>The app has to put the parts back together.</li>
+</ul>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li>Choose sort keys so that useful groups are contiguous. A <code>begins_with</code> or range query can then fetch "summary + details" without the reviews.</li>
+<li>Don't over-split. Fields that are always read and written together belong on the same item.</li>
+<li>If one part is still too big, <a href="#19--compression">compress</a> it or <a href="#20--offload-large-items-to-s3">move it to S3</a>.</li>
+</ul>
+<p>This builds directly on <a href="#17--keep-items-small-use-item-collections">keeping items small</a> and <a href="../02-modelling/#04--single-table-design">single-table design</a>.</p>
+<h2 id="19--compression">19 · Compression</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/04-item-size/19-compression/19-compression.py">19-compression.py</a> · run with <code>just run 19</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>Items are capped at 400 KB, and we pay per 1 KB written and per 4 KB read. Large text attributes (JSON blobs, transcripts, HTML) push items towards the limit, and cost more on every access.</p>
+<h3 id="pattern_2">Pattern</h3>
+<p>We compress large attributes in the application (gzip, zstd, brotli) and store them as a <strong>Binary</strong> (<code>B</code>) attribute. Anything we filter on or project stays as a normal, uncompressed attribute:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>status</th>
+<th>turns</th>
+<th>body_gz</th>
+<th>encoding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CALL#c1</code></td>
+<td><code>TRANSCRIPT</code></td>
+<td>completed</td>
+<td>200</td>
+<td><code>&lt;gzip bytes&gt;</code></td>
+<td><code>gzip+json</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice_2">In practice</h3>
+<p>The script builds a chatty 2,500-turn call transcript as JSON, tries to store it uncompressed, and then stores it gzipped:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">raw</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">transcript</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+<span class="n">compressed</span> <span class="o">=</span> <span class="n">gzip</span><span class="o">.</span><span class="n">compress</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+
+<span class="c1"># Uncompressed, the item is over the 400 KB limit and DynamoDB rejects it.</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;CALL#c1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;TRANSCRIPT&quot;</span><span class="p">,</span> <span class="s2">&quot;body&quot;</span><span class="p">:</span> <span class="n">raw</span><span class="o">.</span><span class="n">decode</span><span class="p">()})</span>
+
+<span class="c1"># Store compressed. Keep queryable fields (status, duration) as plain attributes.</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span>
+    <span class="n">Item</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;CALL#c1&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;TRANSCRIPT&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;completed&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;turns&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">transcript</span><span class="p">),</span>
+        <span class="s2">&quot;body_gz&quot;</span><span class="p">:</span> <span class="n">Binary</span><span class="p">(</span><span class="n">compressed</span><span class="p">),</span>
+        <span class="s2">&quot;encoding&quot;</span><span class="p">:</span> <span class="s2">&quot;gzip+json&quot;</span><span class="p">,</span>
+    <span class="p">}</span>
+<span class="p">)</span>
+
+<span class="n">item</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;CALL#c1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;TRANSCRIPT&quot;</span><span class="p">})[</span><span class="s2">&quot;Item&quot;</span><span class="p">]</span>
+<span class="n">restored</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">gzip</span><span class="o">.</span><span class="n">decompress</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s2">&quot;body_gz&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">value</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>=== Sizes ===
+{
+  &quot;raw_bytes&quot;: 532640,
+  &quot;gzipped_bytes&quot;: 7690,
+  &quot;ratio&quot;: 69.3
+}
+
+&gt;&gt;&gt; PutItem p19-compression
+    item:       {PK: &#39;CALL#c1&#39;, SK: &#39;TRANSCRIPT&#39;, body: &#39;[{&quot;turn&quot;: 0, &quot;speaker&quot;: &quot;caller&quot;, &quot;text&quot;: &quot;Hello, how ca...&#39;}
+
+=== Uncompressed put failed ===
+&quot;An error occurred (ValidationException) when calling the PutItem operation: Item size has exceeded the maximum allowed s&quot;
+
+&gt;&gt;&gt; PutItem p19-compression
+    item:       {PK: &#39;CALL#c1&#39;, SK: &#39;TRANSCRIPT&#39;, status: &#39;completed&#39;, turns: 2500, body_gz: &lt;7690 bytes&gt;, encoding: &#39;gzip+json&#39;}
+
+&gt;&gt;&gt; GetItem p19-compression
+    key:        {PK: &#39;CALL#c1&#39;, SK: &#39;TRANSCRIPT&#39;}
+
+=== Read back ===
+{
+  &quot;status&quot;: &quot;completed&quot;,
+  &quot;turns&quot;: 2500,
+  &quot;first_turn&quot;: {
+    &quot;turn&quot;: 0,
+    &quot;speaker&quot;: &quot;caller&quot;,
+    &quot;text&quot;: &quot;Hello, how can I help you today? Hello, how can I help you today? Hello, how can I help you today? Hello, how can I help you today? Hello, how can I help you today? &quot;
+  }
+}
+</code></pre></div>
+<p>The raw 532 KB document is rejected outright. Gzipped, it's 7.7 KB, which fits easily, and it reads back intact. The 69x ratio is flattered by the very repetitive demo text, but real-world text still often shrinks 5–20x.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li>Text often shrinks 5–20x. That means fewer write units, fewer read units and less storage.</li>
+<li>It keeps a document in a single item when it would otherwise need <a href="#21--chunking">chunking</a> or <a href="#20--offload-large-items-to-s3">offloading to S3</a>.</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li>DynamoDB can't see inside the blob. We can't filter on it, update part of it, or index it.</li>
+<li>Compression costs CPU on the client.</li>
+<li>The data is opaque in the console and to tools like Athena exports, so it has to be decompressed first.</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>Store an <code>encoding</code> attribute, so we can change the algorithm later.</li>
+<li>Compression helps but doesn't remove the limit. If the data can grow without bound, use <a href="#20--offload-large-items-to-s3">S3</a>.</li>
+<li>Binary values are base64-encoded on the wire, but they're billed on their raw byte size.</li>
+</ul>
+<h2 id="20--offload-large-items-to-s3">20 · Offload large items to S3</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/04-item-size/20-offload-to-s3/20-offload-to-s3.py">20-offload-to-s3.py</a> · run with <code>just run 20</code></p>
+<blockquote>
+<p>DynamoDB Local has no S3, so the script simulates the bucket with a local temp directory. The DynamoDB side is real.</p>
+</blockquote>
+<h3 id="problem_3">Problem</h3>
+<p>A DynamoDB item can be at most <strong>400 KB</strong>, counting both attribute names and values. Documents, images, transcripts and large JSON payloads don't fit. Even items that do fit are expensive: every read of a 300 KB item costs about 75 read units (strongly consistent), or about 38 (eventually consistent).</p>
+<h3 id="pattern_3">Pattern</h3>
+<p>We put the bytes in S3, and keep only small, queryable metadata plus a pointer in DynamoDB:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>title</th>
+<th>size</th>
+<th>sha256</th>
+<th>s3Bucket</th>
+<th>s3Key</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DOC#d1</code></td>
+<td><code>META</code></td>
+<td>Quarterly report</td>
+<td>1048576</td>
+<td>ab12…</td>
+<td>my-docs-bucket</td>
+<td><code>docs/d1/v1</code></td>
+</tr>
+</tbody>
+</table>
+<p>The write order matters: <strong>upload to S3 first, then write the DynamoDB item.</strong> If the process crashes in between, we're left with an orphan object rather than a dangling pointer. An S3 lifecycle rule or a sweeper job can clean up orphans.</p>
+<pre class="mermaid">
+sequenceDiagram
+    participant App
+    participant S3
+    participant DynamoDB
+    App-&gt;&gt;S3: 1. PutObject docs/d1/v1 (bytes)
+    App-&gt;&gt;DynamoDB: 2. PutItem DOC#d1 META (pointer + sha256)
+    Note over App,DynamoDB: crash between 1 and 2 leaves an orphan object, never a dangling pointer
+    App-&gt;&gt;DynamoDB: read: GetItem DOC#d1 META
+    App-&gt;&gt;S3: GetObject s3Key, check sha256
+</pre>
+
+<p>On real AWS, the code looks like this:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">s3</span> <span class="o">=</span> <span class="n">boto3</span><span class="o">.</span><span class="n">client</span><span class="p">(</span><span class="s2">&quot;s3&quot;</span><span class="p">)</span>
+<span class="n">s3</span><span class="o">.</span><span class="n">put_object</span><span class="p">(</span><span class="n">Bucket</span><span class="o">=</span><span class="n">BUCKET</span><span class="p">,</span> <span class="n">Key</span><span class="o">=</span><span class="n">key</span><span class="p">,</span> <span class="n">Body</span><span class="o">=</span><span class="n">body</span><span class="p">)</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;DOC#</span><span class="si">{</span><span class="n">doc_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">,</span> <span class="s2">&quot;s3Key&quot;</span><span class="p">:</span> <span class="n">key</span><span class="p">,</span> <span class="o">...</span><span class="p">})</span>
+<span class="c1"># read</span>
+<span class="n">body</span> <span class="o">=</span> <span class="n">s3</span><span class="o">.</span><span class="n">get_object</span><span class="p">(</span><span class="n">Bucket</span><span class="o">=</span><span class="n">item</span><span class="p">[</span><span class="s2">&quot;s3Bucket&quot;</span><span class="p">],</span> <span class="n">Key</span><span class="o">=</span><span class="n">item</span><span class="p">[</span><span class="s2">&quot;s3Key&quot;</span><span class="p">])[</span><span class="s2">&quot;Body&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+</code></pre></div>
+<h3 id="in-practice_3">In practice</h3>
+<p>The script first tries to store a 1 MB document inline, then does it properly. <code>LocalBlobStore</code> has the same <code>put_object</code> / <code>get_object</code> shape as the S3 client:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">s3</span> <span class="o">=</span> <span class="n">LocalBlobStore</span><span class="p">(</span><span class="n">tempfile</span><span class="o">.</span><span class="n">mkdtemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;p20-s3-&quot;</span><span class="p">))</span>
+<span class="n">body</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">urandom</span><span class="p">(</span><span class="mi">1024</span> <span class="o">*</span> <span class="mi">1024</span><span class="p">)</span>
+
+<span class="c1"># Write order matters: blob FIRST, then the pointer.</span>
+<span class="n">s3_key</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;docs/</span><span class="si">{</span><span class="n">doc_id</span><span class="si">}</span><span class="s2">/v1&quot;</span>
+<span class="n">s3</span><span class="o">.</span><span class="n">put_object</span><span class="p">(</span><span class="n">Bucket</span><span class="o">=</span><span class="n">BUCKET</span><span class="p">,</span> <span class="n">Key</span><span class="o">=</span><span class="n">s3_key</span><span class="p">,</span> <span class="n">Body</span><span class="o">=</span><span class="n">body</span><span class="p">)</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span>
+    <span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;DOC#</span><span class="si">{</span><span class="n">doc_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;Quarterly report&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;contentType&quot;</span><span class="p">:</span> <span class="s2">&quot;application/pdf&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;size&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">body</span><span class="p">),</span>
+    <span class="s2">&quot;sha256&quot;</span><span class="p">:</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">body</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">(),</span>
+    <span class="s2">&quot;s3Bucket&quot;</span><span class="p">:</span> <span class="n">BUCKET</span><span class="p">,</span>
+    <span class="s2">&quot;s3Key&quot;</span><span class="p">:</span> <span class="n">s3_key</span><span class="p">,</span>
+    <span class="s2">&quot;uploadedAt&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()),</span>
+<span class="p">})</span>
+
+<span class="n">meta</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;DOC#</span><span class="si">{</span><span class="n">doc_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">})[</span><span class="s2">&quot;Item&quot;</span><span class="p">]</span>
+<span class="n">blob</span> <span class="o">=</span> <span class="n">s3</span><span class="o">.</span><span class="n">get_object</span><span class="p">(</span><span class="n">Bucket</span><span class="o">=</span><span class="n">meta</span><span class="p">[</span><span class="s2">&quot;s3Bucket&quot;</span><span class="p">],</span> <span class="n">Key</span><span class="o">=</span><span class="n">meta</span><span class="p">[</span><span class="s2">&quot;s3Key&quot;</span><span class="p">])[</span><span class="s2">&quot;Body&quot;</span><span class="p">]</span>
+<span class="n">show</span><span class="p">(</span><span class="s2">&quot;Fetched blob matches checksum&quot;</span><span class="p">,</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">blob</span><span class="p">)</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span> <span class="o">==</span> <span class="n">meta</span><span class="p">[</span><span class="s2">&quot;sha256&quot;</span><span class="p">])</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p20-offload-s3
+    item:       {PK: &#39;DOC#too-big&#39;, SK: &#39;META&#39;, body: &lt;1048576 bytes&gt;}
+
+=== Storing 1 MB inline fails ===
+&quot;Item size has exceeded the maximum allowed size&quot;
+
+&gt;&gt;&gt; PutItem p20-offload-s3
+    item:       {PK: &#39;DOC#d1&#39;, SK: &#39;META&#39;, title: &#39;Quarterly report&#39;, contentType: &#39;application/pdf&#39;, size: 1048576, sha256: &#39;4a8e0309324a38f117c58cb7461447c23fb29941ee2f293de72dceef...&#39;, s3Bucket: &#39;my-docs-bucket&#39;, s3Key: &#39;docs/d1/v1&#39;, uploadedAt: 1792496909}
+
+&gt;&gt;&gt; GetItem p20-offload-s3
+    key:        {PK: &#39;DOC#d1&#39;, SK: &#39;META&#39;}
+
+=== DynamoDB item (small, queryable metadata) ===
+{
+  &quot;s3Key&quot;: &quot;docs/d1/v1&quot;,
+  &quot;size&quot;: 1048576,
+  &quot;sha256&quot;: &quot;4a8e0309324a38f117c58cb7461447c23fb29941ee2f293de72dceef1e83bf0a&quot;,
+  &quot;SK&quot;: &quot;META&quot;,
+  &quot;uploadedAt&quot;: 1792496909,
+  &quot;PK&quot;: &quot;DOC#d1&quot;,
+  &quot;title&quot;: &quot;Quarterly report&quot;,
+  &quot;contentType&quot;: &quot;application/pdf&quot;,
+  &quot;s3Bucket&quot;: &quot;my-docs-bucket&quot;
+}
+
+=== Fetched blob matches checksum ===
+true
+</code></pre></div>
+<p>The inline write is rejected. The pointer item is a few hundred bytes, so listing and searching documents stays cheap, and the checksum lets the reader confirm the bytes it fetched are the ones the metadata describes.</p>
+<h3 id="why_3">Why</h3>
+<ul>
+<li>There's no size limit in practice: S3 objects can be up to 5 TB.</li>
+<li>Lists and queries stay cheap, because they only read small items.</li>
+<li>S3 storage costs far less per GB than DynamoDB.</li>
+<li>Clients can download directly from S3 using presigned URLs.</li>
+</ul>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li>Getting the content takes two calls.</li>
+<li>There's no cross-service transaction, so we have to handle orphans and failures ourselves.</li>
+<li>Deletes must remove both sides. A <a href="../06-lifecycle-and-events/#31--dynamodb-streams--cdc">Streams</a> handler can delete the S3 object when the item is deleted.</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li>Use <strong>versioned or immutable keys</strong> (<code>docs/d1/v2</code>). Overwriting the same key lets readers see the new blob with the old metadata.</li>
+<li>Store a checksum, so readers can detect mismatches.</li>
+<li>If the payload is only somewhat too big, try <a href="#19--compression">compression</a> first.</li>
+</ul>
+<p>See also <a href="#18--vertical-partitioning">vertical partitioning</a>, <a href="#21--chunking">chunking</a> and <a href="#17--keep-items-small-use-item-collections">keeping items small</a>.</p>
+<h2 id="21--chunking">21 · Chunking</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/04-item-size/21-chunking/21-chunking.py">21-chunking.py</a> · run with <code>just run 21</code></p>
+<h3 id="problem_4">Problem</h3>
+<p>A value is bigger than the 400 KB item limit even after <a href="#19--compression">compression</a>, and we can't (or won't) use S3.</p>
+<h3 id="pattern_4">Pattern</h3>
+<p>We split the value into fixed-size pieces and store each piece as its own item under the same partition key, with a zero-padded sort key. A manifest item records how many chunks there are:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DOC#report-2026</code></td>
+<td><code>CHUNK#0000</code></td>
+<td>data (300 KB), version</td>
+</tr>
+<tr>
+<td><code>DOC#report-2026</code></td>
+<td><code>CHUNK#0001</code></td>
+<td>data (300 KB), version</td>
+</tr>
+<tr>
+<td><code>DOC#report-2026</code></td>
+<td><code>CHUNK#0002</code></td>
+<td>data, version</td>
+</tr>
+<tr>
+<td><code>DOC#report-2026</code></td>
+<td><code>MANIFEST</code></td>
+<td>chunks=4, size, version</td>
+</tr>
+</tbody>
+</table>
+<p>To read it back, we <code>Query(PK=DOC#..., SK begins_with CHUNK#)</code> and concatenate the pieces in order.</p>
+<h3 id="in-practice_4">In practice</h3>
+<p>The script splits ~1 MB of random bytes into 300 KB chunks, writes them alongside a manifest, then reads them back with a paged query:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">CHUNK_SIZE</span> <span class="o">=</span> <span class="mi">300</span> <span class="o">*</span> <span class="mi">1024</span>  <span class="c1"># stay safely under the 400 KB item limit</span>
+<span class="n">blob</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">urandom</span><span class="p">(</span><span class="mi">1_000_000</span><span class="p">)</span>  <span class="c1"># ~1 MB - too big for one item</span>
+<span class="n">chunks</span> <span class="o">=</span> <span class="p">[</span><span class="n">blob</span><span class="p">[</span><span class="n">i</span> <span class="p">:</span> <span class="n">i</span> <span class="o">+</span> <span class="n">CHUNK_SIZE</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">blob</span><span class="p">),</span> <span class="n">CHUNK_SIZE</span><span class="p">)]</span>
+
+<span class="k">with</span> <span class="n">table</span><span class="o">.</span><span class="n">batch_writer</span><span class="p">()</span> <span class="k">as</span> <span class="n">batch</span><span class="p">:</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="n">DOC_ID</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;MANIFEST&quot;</span><span class="p">,</span> <span class="s2">&quot;chunks&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">chunks</span><span class="p">),</span> <span class="s2">&quot;size&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">blob</span><span class="p">),</span> <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">})</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">chunks</span><span class="p">):</span>
+        <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="n">DOC_ID</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;CHUNK#</span><span class="si">{</span><span class="n">i</span><span class="si">:</span><span class="s2">04d</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="n">Binary</span><span class="p">(</span><span class="n">chunk</span><span class="p">),</span> <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">})</span>
+
+<span class="c1"># Read: one Query returns the chunks in SK order. Query pages at 1 MB, so loop.</span>
+<span class="n">parts</span><span class="p">,</span> <span class="n">kwargs</span> <span class="o">=</span> <span class="p">[],</span> <span class="p">{</span><span class="s2">&quot;KeyConditionExpression&quot;</span><span class="p">:</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="n">DOC_ID</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;CHUNK#&quot;</span><span class="p">)}</span>
+<span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="n">parts</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">item</span><span class="p">[</span><span class="s2">&quot;data&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">value</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;Items&quot;</span><span class="p">])</span>
+    <span class="k">if</span> <span class="s2">&quot;LastEvaluatedKey&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">resp</span><span class="p">:</span>
+        <span class="k">break</span>
+    <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;ExclusiveStartKey&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;LastEvaluatedKey&quot;</span><span class="p">]</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; BatchWriteItem
+    p21-chunking: 5 puts, 0 deletes
+
+=== Wrote ===
+{
+  &quot;bytes&quot;: 1000000,
+  &quot;chunks&quot;: 4
+}
+
+&gt;&gt;&gt; Query p21-chunking
+    key:        (PK = &#39;DOC#report-2026&#39; AND begins_with(SK, &#39;CHUNK#&#39;))
+
+&gt;&gt;&gt; GetItem p21-chunking
+    key:        {PK: &#39;DOC#report-2026&#39;, SK: &#39;MANIFEST&#39;}
+
+=== Reassembled ===
+{
+  &quot;chunks_read&quot;: 4,
+  &quot;expected&quot;: 4,
+  &quot;matches&quot;: true
+}
+</code></pre></div>
+<p>The manifest plus 4 chunks go in as 5 puts in a single batch, and a single query returns all 4 chunks in order. The reassembled bytes match the original, and the chunk count matches the manifest.</p>
+<h3 id="why_4">Why</h3>
+<ul>
+<li>No extra service is needed. Everything stays in DynamoDB, including backups, streams and IAM.</li>
+<li>Reads stay in one partition and come back ordered by the sort key.</li>
+</ul>
+<h3 id="trade-offs_4">Trade-offs</h3>
+<ul>
+<li><strong>This is usually the wrong choice.</strong> <a href="#20--offload-large-items-to-s3">Offloading to S3</a> is cheaper and simpler for large blobs, since DynamoDB storage and throughput cost much more per GB than S3.</li>
+<li>Reading 1 MB costs about 250 RCUs (strongly consistent), whereas an S3 GET is a flat fee.</li>
+<li>Writes aren't atomic unless we use a <a href="../05-consistency/#25--transactions">transaction</a> (max 100 items, 4 MB total). Without one, readers can see a half-written document.</li>
+</ul>
+<h3 id="gotchas_4">Gotchas</h3>
+<ul>
+<li>Zero-pad chunk numbers (<code>0001</code>, not <code>1</code>). Otherwise <code>CHUNK#10</code> sorts before <code>CHUNK#2</code>.</li>
+<li>Put a <code>version</code> on every chunk and on the manifest. Readers should reject a mix of versions. Writers should write the new chunks first, then flip the manifest.</li>
+<li><code>Query</code> returns at most 1 MB per page, so we always follow <code>LastEvaluatedKey</code>.</li>
+<li>When a document shrinks, delete the extra chunks left over from the old version.</li>
+</ul>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/03-querying/">03 - Querying</a> | <a href="/posts/08-dynamodb-patterns/05-consistency/">05 - Consistency &amp; concurrency</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

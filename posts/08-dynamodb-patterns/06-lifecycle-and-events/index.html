@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 - Lifecycle &amp; events</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>06 - Lifecycle &amp; events</h1>
+<p><small>2026-10-20</small></p>
+<p>So far we have looked at data as a snapshot: what goes in the keys, how we read it back, how we keep writes safe. This page is about what happens to data <strong>over time</strong>, and how to react when it changes.</p>
+<p>DynamoDB gives us two building blocks here. <strong>TTL</strong> expires items after an epoch-seconds timestamp at no write cost. Deletion is lazy, though (it can take hours to days), so we still filter out expired items on read. <strong>DynamoDB Streams</strong> is change data capture: an ordered log of every insert, update and delete, each carrying the old and/or new image, delivered in order per item for 24 hours. A Lambda (or any other consumer) projects those changes into search indexes, caches, analytics or other tables.</p>
+<p>Put them together and we get two very useful patterns. <strong>Aggregates via streams</strong>: instead of counting at read time, we apply each change as a delta to a running total, so reads become a single <code>GetItem</code>. <strong>Soft delete, then archive</strong>: we mark an item deleted (and drop it out of sparse indexes), let TTL remove it, and let the stream's <code>REMOVE</code> event copy it to S3.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>What we'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>30</td>
+<td><a href="#30--ttl-for-expiry">TTL for expiry</a></td>
+<td>Enabling TTL, filtering expired items, the milliseconds bug</td>
+</tr>
+<tr>
+<td>31</td>
+<td><a href="#31--dynamodb-streams--cdc">DynamoDB Streams / CDC</a></td>
+<td>Reading a stream and projecting it into another store</td>
+</tr>
+<tr>
+<td>32</td>
+<td><a href="#32--streams-maintained-aggregates">Streams-maintained aggregates</a></td>
+<td>Running totals from <code>INSERT</code>/<code>MODIFY</code>/<code>REMOVE</code> deltas</td>
+</tr>
+<tr>
+<td>33</td>
+<td><a href="#33--soft-delete--archival">Soft delete &amp; archival</a></td>
+<td>Soft delete, then TTL, then archive to S3 via the stream</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="30--ttl-for-expiry">30 · TTL for expiry</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/06-lifecycle-and-events/30-ttl-expiry/30-ttl-expiry.py">30-ttl-expiry.py</a> · run with <code>just run 30</code></p>
+<h3 id="problem">Problem</h3>
+<p>Plenty of data has a shelf life: sessions, OTP codes, idempotency records, locks, caches and old events all need deleting eventually. The obvious answer is a cron job that scans for old items and deletes them, but that job costs capacity (every scan and every delete is billed) and it is one more thing to run and monitor.</p>
+<h3 id="pattern">Pattern</h3>
+<p>We enable <strong>Time To Live</strong> on a Number attribute holding an <strong>epoch time in seconds</strong>. Once that time has passed, DynamoDB deletes the item in the background, for free.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">update_time_to_live</span><span class="p">(</span>
+    <span class="n">TableName</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+    <span class="n">TimeToLiveSpecification</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;Enabled&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span> <span class="s2">&quot;AttributeName&quot;</span><span class="p">:</span> <span class="s2">&quot;expiresAt&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;USER#alice&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;SESSION#abc&quot;</span><span class="p">,</span> <span class="s2">&quot;expiresAt&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())</span> <span class="o">+</span> <span class="mi">3600</span><span class="p">})</span>
+</code></pre></div>
+<p>Items decide for themselves whether they expire. An item whose <code>expiresAt</code> is in the past is eligible for deletion, one in the future is kept, and one without the attribute at all never expires:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>expiresAt</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>SESSION#old</code></td>
+<td>now − 60</td>
+<td>eligible to delete</td>
+</tr>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>SESSION#new</code></td>
+<td>now + 3600</td>
+<td>kept</td>
+</tr>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>PROFILE</code></td>
+<td>(missing)</td>
+<td>never expires</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice">In practice</h3>
+<p>The script enables TTL, writes the three items above, then queries the partition twice: once raw, once with a filter that hides anything already expired. Finally it writes a session with a <strong>millisecond</strong> timestamp to show the most common TTL bug.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">raw</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#alice&quot;</span><span class="p">))[</span><span class="s2">&quot;Items&quot;</span><span class="p">]</span>
+
+<span class="n">fresh</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#alice&quot;</span><span class="p">),</span>
+    <span class="n">FilterExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="s2">&quot;expiresAt&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">not_exists</span><span class="p">()</span> <span class="o">|</span> <span class="n">Attr</span><span class="p">(</span><span class="s2">&quot;expiresAt&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">gt</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())),</span>
+<span class="p">)[</span><span class="s2">&quot;Items&quot;</span><span class="p">]</span>
+
+<span class="c1"># Common mistake: milliseconds instead of seconds</span>
+<span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;USER#alice&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;SESSION#bug&quot;</span><span class="p">,</span> <span class="s2">&quot;expiresAt&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">)})</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; UpdateTimeToLive p30-ttl-expiry
+
+&gt;&gt;&gt; DescribeTimeToLive p30-ttl-expiry
+
+=== TTL status ===
+{
+  &quot;TimeToLiveStatus&quot;: &quot;ENABLED&quot;,
+  &quot;AttributeName&quot;: &quot;expiresAt&quot;
+}
+
+&gt;&gt;&gt; BatchWriteItem
+    p30-ttl-expiry: 3 puts, 0 deletes
+
+&gt;&gt;&gt; Query p30-ttl-expiry
+    key:        PK = &#39;USER#alice&#39;
+
+=== Raw query (may include expired items) ===
+[
+  &quot;PROFILE&quot;,
+  &quot;SESSION#new&quot;,
+  &quot;SESSION#old&quot;
+]
+
+&gt;&gt;&gt; Query p30-ttl-expiry
+    key:        PK = &#39;USER#alice&#39;
+    filter:     (attribute_not_exists(expiresAt) OR expiresAt &gt; 1792496917)
+
+=== Filtered query (live items only) ===
+[
+  &quot;PROFILE&quot;,
+  &quot;SESSION#new&quot;
+]
+
+&gt;&gt;&gt; PutItem p30-ttl-expiry
+    item:       {PK: &#39;USER#alice&#39;, SK: &#39;SESSION#bug&#39;, expiresAt: 1792496917261}
+
+&gt;&gt;&gt; GetItem p30-ttl-expiry
+    key:        {PK: &#39;USER#alice&#39;, SK: &#39;SESSION#bug&#39;}
+
+=== Milliseconds TTL value (wrong!) ===
+{
+  &quot;SK&quot;: &quot;SESSION#bug&quot;,
+  &quot;expiresAt&quot;: 1792496917261,
+  &quot;PK&quot;: &quot;USER#alice&quot;
+}
+</code></pre></div>
+<p>The raw query still returns <code>SESSION#old</code> even though it expired a minute ago. That is exactly what happens on AWS too, because the TTL sweeper runs whenever it gets round to it. The filtered query is what our application should actually use. The last item has <code>expiresAt: 1792496917261</code>, three extra digits, which TTL reads as a date tens of thousands of years from now, so it will never be deleted.</p>
+<h3 id="why">Why</h3>
+<ul>
+<li><strong>Free deletes.</strong> TTL deletes use no write capacity.</li>
+<li><strong>No sweeper jobs</strong> to write, schedule or monitor.</li>
+<li><strong>TTL deletes show up in Streams</strong>, tagged with <code>userIdentity.principalId = dynamodb.amazonaws.com</code>, so we can archive expired items to S3 (see <a href="#31--dynamodb-streams--cdc">31</a> and <a href="#33--soft-delete--archival">33</a>).</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<ul>
+<li><strong>It's not precise.</strong> Deletion usually happens within a few days of expiry, and expired items stay readable until then.</li>
+<li>We get <strong>one TTL attribute per table</strong>. Items without it never expire.</li>
+</ul>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li><strong>Always filter expired items on read:</strong> <code>attribute_not_exists(expiresAt) OR expiresAt &gt; :now</code>.</li>
+<li><strong>Seconds, not milliseconds.</strong> A millisecond value looks like a date tens of thousands of years away, so the item is never deleted. The script above shows this bug.</li>
+<li>Items that expired <strong>more than 5 years ago</strong> are ignored by TTL, and the value must be a <strong>Number</strong>, not a String.</li>
+<li>Turning TTL on or off can take <strong>up to an hour</strong> on AWS.</li>
+<li>DynamoDB Local accepts <code>UpdateTimeToLive</code>, but we shouldn't rely on it to delete items on the AWS schedule. Locally, test the read-side filter instead.</li>
+</ul>
+<hr />
+<h2 id="31--dynamodb-streams--cdc">31 · DynamoDB Streams / CDC</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/06-lifecycle-and-events/31-streams-cdc/31-streams-cdc.py">31-streams-cdc.py</a> · run with <code>just run 31</code></p>
+<h3 id="problem_1">Problem</h3>
+<p>When an item changes, other systems often need to know about it: a search index, a cache, an analytics pipeline, another service. The tempting approach is for the application to write to DynamoDB <em>and</em> then call those systems. But if the process crashes between the two calls, they are out of sync, and nothing will ever notice. This is the classic <strong>dual write</strong> problem.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We turn on <strong>DynamoDB Streams</strong>. Every insert, update and delete is written to an ordered, durable change log that is kept for 24 hours. A consumer (usually a Lambda) reads that log and pushes changes downstream. The table write becomes the single source of truth, and the stream acts as a built-in <strong>transactional outbox</strong>.</p>
+<pre class="mermaid">
+flowchart LR
+    App --&gt;|PutItem / UpdateItem / DeleteItem| T[(DynamoDB table)]
+    T --&gt;|change log, 24h| S[Stream]
+    S --&gt; L[Consumer / Lambda]
+    L --&gt; Search[Search index]
+    L --&gt; Cache[Cache]
+    L --&gt; Analytics[Analytics]
+</pre>
+
+<p>When we enable a stream we choose what each record carries:</p>
+<table>
+<thead>
+<tr>
+<th>Stream view type</th>
+<th>Record contains</th>
+<th>Use for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEYS_ONLY</code></td>
+<td>keys only</td>
+<td>"something changed, re-read it"</td>
+</tr>
+<tr>
+<td><code>NEW_IMAGE</code></td>
+<td>item after the change</td>
+<td>search sync, replication</td>
+</tr>
+<tr>
+<td><code>OLD_IMAGE</code></td>
+<td>item before the change</td>
+<td>auditing deletes</td>
+</tr>
+<tr>
+<td><code>NEW_AND_OLD_IMAGES</code></td>
+<td>both</td>
+<td>diffs, aggregates (<a href="#32--streams-maintained-aggregates">32</a>)</td>
+</tr>
+</tbody>
+</table>
+<p>In AWS we don't poll the stream by hand. We attach a Lambda through an event source mapping:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">lambda_client</span><span class="o">.</span><span class="n">create_event_source_mapping</span><span class="p">(</span>
+    <span class="n">EventSourceArn</span><span class="o">=</span><span class="n">table</span><span class="o">.</span><span class="n">latest_stream_arn</span><span class="p">,</span>
+    <span class="n">FunctionName</span><span class="o">=</span><span class="s2">&quot;sync-to-search&quot;</span><span class="p">,</span>
+    <span class="n">StartingPosition</span><span class="o">=</span><span class="s2">&quot;LATEST&quot;</span><span class="p">,</span>
+    <span class="n">BatchSize</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+    <span class="n">BisectBatchOnFunctionError</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">DestinationConfig</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;OnFailure&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;Destination&quot;</span><span class="p">:</span> <span class="n">dlq_arn</span><span class="p">}},</span>
+<span class="p">)</span>
+</code></pre></div>
+<h3 id="in-practice_1">In practice</h3>
+<p>DynamoDB Local supports Streams, so this one runs locally as-is. The script writes, updates and deletes an order. It never calls a second system. Then it reads the stream by hand (describe → shards → iterator → records), the way a Lambda trigger would for us, and replays it into a dict that stands in for a search index.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span> <span class="o">=</span> <span class="n">recreate_table</span><span class="p">(</span><span class="s2">&quot;p31-streams-cdc&quot;</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="s2">&quot;NEW_AND_OLD_IMAGES&quot;</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">handle</span><span class="p">(</span><span class="n">record</span><span class="p">):</span>
+    <span class="n">event</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;eventName&quot;</span><span class="p">]</span>  <span class="c1"># INSERT | MODIFY | REMOVE</span>
+    <span class="n">keys</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;dynamodb&quot;</span><span class="p">][</span><span class="s2">&quot;Keys&quot;</span><span class="p">]</span>
+    <span class="n">doc_id</span> <span class="o">=</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">keys</span><span class="p">[</span><span class="s2">&quot;PK&quot;</span><span class="p">][</span><span class="s2">&quot;S&quot;</span><span class="p">]</span><span class="si">}</span><span class="s1">|</span><span class="si">{</span><span class="n">keys</span><span class="p">[</span><span class="s2">&quot;SK&quot;</span><span class="p">][</span><span class="s2">&quot;S&quot;</span><span class="p">]</span><span class="si">}</span><span class="s1">&#39;</span>
+    <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;REMOVE&quot;</span><span class="p">:</span>
+        <span class="n">search_index</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">doc_id</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">search_index</span><span class="p">[</span><span class="n">doc_id</span><span class="p">]</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;dynamodb&quot;</span><span class="p">][</span><span class="s2">&quot;NewImage&quot;</span><span class="p">]</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p31-streams-cdc
+    item:       {PK: &#39;ORDER#o1&#39;, SK: &#39;META&#39;, status: &#39;PLACED&#39;, total: 42}
+
+&gt;&gt;&gt; UpdateItem p31-streams-cdc
+    key:        {PK: &#39;ORDER#o1&#39;, SK: &#39;META&#39;}
+    update:     SET status = &#39;SHIPPED&#39;
+
+&gt;&gt;&gt; DeleteItem p31-streams-cdc
+    key:        {PK: &#39;ORDER#o1&#39;, SK: &#39;META&#39;}
+
+=== Processing stream records ===
+
+&gt;&gt;&gt; DescribeStream
+
+&gt;&gt;&gt; GetShardIterator
+
+&gt;&gt;&gt; GetRecords
+    Limit:      100
+INSERT  ORDER#o1|META  status: None -&gt; PLACED  index size=1
+MODIFY  ORDER#o1|META  status: PLACED -&gt; SHIPPED  index size=1
+REMOVE  ORDER#o1|META  status: SHIPPED -&gt; None  index size=0
+
+&gt;&gt;&gt; GetRecords
+    Limit:      100
+
+=== Search index after replay ===
+{}
+</code></pre></div>
+<p>Three table writes produce three stream records, in order, each with the before and after <code>status</code>. The consumer adds the order to the index, updates it, then removes it, so the index ends up empty, matching the table. The second, empty <code>GetRecords</code> is the consumer catching up. A real consumer would keep polling.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li><strong>No dual writes.</strong> If the table write succeeds, the change event will exist.</li>
+<li><strong>Changes arrive in order per item.</strong> Records for one key are ordered within a shard.</li>
+<li><strong>Decoupled.</strong> We can add new consumers later without touching the writer.</li>
+</ul>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<ul>
+<li><strong>At-least-once delivery.</strong> The same record can be delivered more than once, so consumers must be idempotent (<a href="../05-consistency/#27--idempotency-keys">27 · Idempotency keys</a>).</li>
+<li><strong>24-hour retention.</strong> If a consumer is broken for longer than that, events are lost. If we need longer retention or more than 2 consumers, Kinesis Data Streams for DynamoDB is the alternative.</li>
+<li><strong>Downstream is eventually consistent.</strong> Readers of the search index see changes a little later than readers of the table.</li>
+<li>A shard supports <strong>about 2 concurrent readers</strong>. If more systems need the events, fan out through EventBridge or SNS.</li>
+</ul>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li>A failing record <strong>blocks its shard</strong> and is retried until it expires. Always set <code>BisectBatchOnFunctionError</code>, a max retry count and an on-failure destination.</li>
+<li>TTL deletes appear on the stream with <code>userIdentity.principalId = "dynamodb.amazonaws.com"</code>. We use that to tell expiry apart from user deletes (<a href="#30--ttl-for-expiry">30</a>, <a href="#33--soft-delete--archival">33</a>).</li>
+<li>DynamoDB Local supports Streams, so the script needs no simulation.</li>
+</ul>
+<hr />
+<h2 id="32--streams-maintained-aggregates">32 · Streams-maintained aggregates</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/06-lifecycle-and-events/32-streams-aggregates/32-streams-aggregates.py">32-streams-aggregates.py</a> · run with <code>just run 32</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>"How many orders does this store have, and what's the revenue?" is a perfectly normal question, but DynamoDB has no <code>COUNT(*)</code> or <code>SUM()</code>. Computing the answer at read time means querying every order item and adding them up in the client, which gets slower and more expensive as the data grows.</p>
+<h3 id="pattern_2">Pattern</h3>
+<p>We store the answer as <strong>its own item</strong> and keep it current from the stream (<a href="#31--dynamodb-streams--cdc">31</a>). Writers only ever write orders. A stream consumer turns each change into a delta and applies it with an atomic <code>ADD</code> (<a href="../05-consistency/#24--atomic-counters">24 · Atomic counters</a>).</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>type</th>
+<th>attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>STORE#s1</code></td>
+<td><code>ORDER#o1</code></td>
+<td>Order</td>
+<td>total=42</td>
+</tr>
+<tr>
+<td><code>STORE#s1</code></td>
+<td><code>ORDER#o2</code></td>
+<td>Order</td>
+<td>total=20</td>
+</tr>
+<tr>
+<td><code>STORE#s1</code></td>
+<td><code>STATS</code></td>
+<td>—</td>
+<td>orderCount=2, revenue=62</td>
+</tr>
+</tbody>
+</table>
+<p>With <code>NEW_AND_OLD_IMAGES</code> on the stream, every record tells us exactly how the totals should move:</p>
+<ul>
+<li><code>INSERT</code> → count +1, revenue +new</li>
+<li><code>MODIFY</code> → count 0, revenue +(new − old)</li>
+<li><code>REMOVE</code> → count −1, revenue −old</li>
+</ul>
+<p>Reading the aggregate is then a single <code>GetItem(PK=STORE#s1, SK=STATS)</code>.</p>
+<h3 id="in-practice_2">In practice</h3>
+<p>The script writes three orders, changes o2's total from 17 to 20, and deletes o3. Then the consumer drains the stream and applies each change as a delta:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">apply</span><span class="p">(</span><span class="n">record</span><span class="p">):</span>
+    <span class="n">img_old</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;dynamodb&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;OldImage&quot;</span><span class="p">,</span> <span class="p">{})</span>
+    <span class="n">img_new</span> <span class="o">=</span> <span class="n">record</span><span class="p">[</span><span class="s2">&quot;dynamodb&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;NewImage&quot;</span><span class="p">,</span> <span class="p">{})</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">img_new</span> <span class="ow">or</span> <span class="n">img_old</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;type&quot;</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;S&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">&quot;Order&quot;</span><span class="p">:</span>
+        <span class="k">return</span>  <span class="c1"># ignore our own aggregate writes (they&#39;re on the stream too!)</span>
+
+    <span class="n">old_total</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">img_old</span><span class="p">[</span><span class="s2">&quot;total&quot;</span><span class="p">][</span><span class="s2">&quot;N&quot;</span><span class="p">])</span> <span class="k">if</span> <span class="n">img_old</span> <span class="k">else</span> <span class="mi">0</span>
+    <span class="n">new_total</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">img_new</span><span class="p">[</span><span class="s2">&quot;total&quot;</span><span class="p">][</span><span class="s2">&quot;N&quot;</span><span class="p">])</span> <span class="k">if</span> <span class="n">img_new</span> <span class="k">else</span> <span class="mi">0</span>
+    <span class="n">count_delta</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;INSERT&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;REMOVE&quot;</span><span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">}</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">record</span><span class="p">[</span><span class="s2">&quot;eventName&quot;</span><span class="p">],</span> <span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">store</span> <span class="o">=</span> <span class="p">(</span><span class="n">img_new</span> <span class="ow">or</span> <span class="n">img_old</span><span class="p">)[</span><span class="s2">&quot;PK&quot;</span><span class="p">][</span><span class="s2">&quot;S&quot;</span><span class="p">]</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+        <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="n">store</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;STATS&quot;</span><span class="p">},</span>
+        <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;ADD orderCount :c, revenue :r&quot;</span><span class="p">,</span>
+        <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:c&quot;</span><span class="p">:</span> <span class="n">count_delta</span><span class="p">,</span> <span class="s2">&quot;:r&quot;</span><span class="p">:</span> <span class="n">new_total</span> <span class="o">-</span> <span class="n">old_total</span><span class="p">},</span>
+    <span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p32-streams-aggregates
+    item:       {PK: &#39;STORE#s1&#39;, SK: &#39;ORDER#o1&#39;, type: &#39;Order&#39;, total: 42}
+...
+&gt;&gt;&gt; UpdateItem p32-streams-aggregates
+    key:        {PK: &#39;STORE#s1&#39;, SK: &#39;ORDER#o2&#39;}
+    update:     SET total = 20
+
+&gt;&gt;&gt; DeleteItem p32-streams-aggregates
+    key:        {PK: &#39;STORE#s1&#39;, SK: &#39;ORDER#o3&#39;}
+
+=== Consuming stream ===
+
+&gt;&gt;&gt; DescribeStream
+
+&gt;&gt;&gt; GetShardIterator
+
+&gt;&gt;&gt; GetRecords
+    Limit:      100
+
+&gt;&gt;&gt; UpdateItem p32-streams-aggregates
+    key:        {PK: &#39;STORE#s1&#39;, SK: &#39;STATS&#39;}
+    update:     ADD orderCount 1, revenue 42
+INSERT  count +1  revenue +42
+
+&gt;&gt;&gt; UpdateItem p32-streams-aggregates
+    key:        {PK: &#39;STORE#s1&#39;, SK: &#39;STATS&#39;}
+    update:     ADD orderCount 1, revenue 17
+INSERT  count +1  revenue +17
+
+&gt;&gt;&gt; UpdateItem p32-streams-aggregates
+    key:        {PK: &#39;STORE#s1&#39;, SK: &#39;STATS&#39;}
+    update:     ADD orderCount 1, revenue 99
+INSERT  count +1  revenue +99
+MODIFY  count +0  revenue +3
+REMOVE  count -1  revenue -99
+    ... (+2 more UpdateItem calls not shown)
+
+&gt;&gt;&gt; GetItem p32-streams-aggregates
+    key:        {PK: &#39;STORE#s1&#39;, SK: &#39;STATS&#39;}
+
+=== Aggregate item (read with one GetItem) ===
+{
+  &quot;SK&quot;: &quot;STATS&quot;,
+  &quot;orderCount&quot;: 2,
+  &quot;revenue&quot;: 62,
+  &quot;PK&quot;: &quot;STORE#s1&quot;
+}
+
+&gt;&gt;&gt; Query p32-streams-aggregates
+    key:        (PK = &#39;STORE#s1&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+
+=== Recomputed from orders ===
+{
+  &quot;orderCount&quot;: 2,
+  &quot;revenue&quot;: 62
+}
+</code></pre></div>
+<p>Each record becomes one <code>ADD</code>: three inserts, then the <code>MODIFY</code> adds only the difference (+3), and the <code>REMOVE</code> takes o3 back out. (The request log collapses the last two <code>UpdateItem</code> calls, but their deltas are printed.) The aggregate item reads <code>orderCount: 2, revenue: 62</code>, which matches the slow way of querying every order and summing.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li><strong>Cheap reads.</strong> O(1) instead of O(number of orders).</li>
+<li><strong>Writers stay simple.</strong> There's no extra update or transaction on the hot path.</li>
+<li><strong>No contention on the write path.</strong> Many writers don't fight over the stats item, because only the consumer updates it.</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li><strong>Eventually consistent.</strong> The aggregate lags the orders by the stream delay, usually under a second.</li>
+<li><strong>At-least-once delivery.</strong> A retried batch can apply a delta twice. For exact numbers, record the processed <code>eventID</code>s or the stream sequence number and skip duplicates (<a href="../05-consistency/#27--idempotency-keys">27 · Idempotency keys</a>), or rebuild the aggregate periodically from the source.</li>
+<li>A very hot aggregate item can still hit the <strong>1,000 WCU per partition</strong> limit. Batch the deltas in the consumer (sum a whole batch, then one <code>ADD</code>), or shard the counter (<a href="../07-performance-and-scale/#35--write-sharding">35 · Write sharding</a>).</li>
+<li>The alternative is updating the aggregate inside a <code>TransactWriteItems</code> along with the order (<a href="../05-consistency/#25--transactions">25 · Transactions</a>). That is strongly consistent, but it costs 2x and serialises writers on one item.</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>The consumer's own writes to the <code>STATS</code> item <strong>also appear on the stream</strong>. If we don't filter them out (the script checks <code>type == "Order"</code>), we get an infinite loop. In AWS, use event-source-mapping <strong>filter criteria</strong> to drop them before the Lambda even runs.</li>
+</ul>
+<hr />
+<h2 id="33--soft-delete--archival">33 · Soft delete &amp; archival</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/06-lifecycle-and-events/33-soft-delete-archival/33-soft-delete-archival.py">33-soft-delete-archival.py</a> · run with <code>just run 33</code></p>
+<h3 id="problem_3">Problem</h3>
+<p>Users delete things and then want them back ("trash", "undo"). Compliance may require us to keep deleted records somewhere. At the same time, we don't want deleted items cluttering our queries, and we don't want to pay to store them in DynamoDB forever.</p>
+<h3 id="pattern_3">Pattern</h3>
+<p>We do it in three stages, each building on a pattern we've already seen:</p>
+<ol>
+<li><strong>Soft delete.</strong> An <code>UpdateItem</code> sets <code>deletedAt</code>, sets a TTL attribute (<code>expiresAt</code>), and <code>REMOVE</code>s the GSI key attributes. Because GSIs are sparse (<a href="../02-modelling/#10--sparse-index">10 · Sparse index</a>), the item disappears from list views straight away, but it is still readable by key for undo or a trash view.</li>
+<li><strong>Hard delete.</strong> When <code>expiresAt</code> passes, DynamoDB TTL deletes the item for free (<a href="#30--ttl-for-expiry">30</a>).</li>
+<li><strong>Archive.</strong> A stream consumer (<a href="#31--dynamodb-streams--cdc">31</a>) sees the <code>REMOVE</code> and writes the old image to S3, where it's cheap to keep and queryable with Athena.</li>
+</ol>
+<pre class="mermaid">
+flowchart LR
+    A[Active item&lt;br/&gt;in GSI] --&gt;|soft delete:&lt;br/&gt;SET deletedAt, expiresAt&lt;br/&gt;REMOVE GSI keys| B[Soft-deleted&lt;br/&gt;readable by key]
+    B --&gt;|undo| A
+    B --&gt;|TTL expires| C[Deleted]
+    C --&gt;|stream REMOVE&lt;br/&gt;with OLD_IMAGE| D[(S3 archive)]
+</pre>
+
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>title</th>
+<th>GSI1PK</th>
+<th>deletedAt</th>
+<th>expiresAt</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DOC#d1</code></td>
+<td><code>META</code></td>
+<td>Q3 plan</td>
+<td><code>FOLDER#work</code></td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td><code>DOC#d2</code></td>
+<td><code>META</code></td>
+<td>Old draft</td>
+<td><em>(removed)</em></td>
+<td>1792494255</td>
+<td>+30 days</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Undo</strong> is just the reverse update: <code>SET GSI1PK = :folder, GSI1SK = :sk REMOVE deletedAt, expiresAt</code>.</p>
+<h3 id="in-practice_3">In practice</h3>
+<p>DynamoDB Local accepts <code>UpdateTimeToLive</code> but never actually expires items, so the script <strong>simulates</strong> the hard delete with a plain <code>DeleteItem</code>, and archives into a dict rather than S3. In AWS the consumer would call:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">s3</span><span class="o">.</span><span class="n">put_object</span><span class="p">(</span><span class="n">Bucket</span><span class="o">=</span><span class="s2">&quot;archive&quot;</span><span class="p">,</span> <span class="n">Key</span><span class="o">=...</span><span class="p">,</span> <span class="n">Body</span><span class="o">=</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">old_image</span><span class="p">))</span>
+</code></pre></div>
+<p>The soft delete itself is one update:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">RETENTION</span> <span class="o">=</span> <span class="mi">30</span> <span class="o">*</span> <span class="mi">24</span> <span class="o">*</span> <span class="mi">3600</span>
+<span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;DOC#d2&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET deletedAt = :now, expiresAt = :exp REMOVE GSI1PK, GSI1SK&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:now&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()),</span> <span class="s2">&quot;:exp&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">())</span> <span class="o">+</span> <span class="n">RETENTION</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p33-soft-delete-archival
+    key:        GSI1PK = &#39;FOLDER#work&#39;
+    IndexName:  GSI1
+
+=== Folder before delete ===
+[
+  &quot;Q3 plan&quot;,
+  &quot;Old draft&quot;,
+  &quot;Budget&quot;
+]
+
+&gt;&gt;&gt; UpdateItem p33-soft-delete-archival
+    key:        {PK: &#39;DOC#d2&#39;, SK: &#39;META&#39;}
+    update:     SET deletedAt = 1792496918, expiresAt = 1795088918 REMOVE GSI1PK, GSI1SK
+
+&gt;&gt;&gt; Query p33-soft-delete-archival
+    key:        GSI1PK = &#39;FOLDER#work&#39;
+    IndexName:  GSI1
+
+=== Folder after soft delete (d2 hidden) ===
+[
+  &quot;Q3 plan&quot;,
+  &quot;Budget&quot;
+]
+
+&gt;&gt;&gt; GetItem p33-soft-delete-archival
+    key:        {PK: &#39;DOC#d2&#39;, SK: &#39;META&#39;}
+
+=== d2 is still there for undo / trash view ===
+{
+  &quot;SK&quot;: &quot;META&quot;,
+  &quot;deletedAt&quot;: 1792496918,
+  &quot;PK&quot;: &quot;DOC#d2&quot;,
+  &quot;title&quot;: &quot;Old draft&quot;,
+  &quot;expiresAt&quot;: 1795088918
+}
+
+&gt;&gt;&gt; DeleteItem p33-soft-delete-archival
+    key:        {PK: &#39;DOC#d2&#39;, SK: &#39;META&#39;}
+
+&gt;&gt;&gt; DescribeStream
+
+&gt;&gt;&gt; GetShardIterator
+
+&gt;&gt;&gt; GetRecords
+archived archive/DOC#d2.json (deleted by TTL: False)
+
+&gt;&gt;&gt; GetRecords
+
+=== Fake S3 bucket ===
+{
+  &quot;archive/DOC#d2.json&quot;: &quot;{\&quot;deletedAt\&quot;: {\&quot;N\&quot;: \&quot;1792496918\&quot;}, \&quot;SK\&quot;: {\&quot;S\&quot;: \&quot;META\&quot;}, \&quot;PK\&quot;: {\&quot;S\&quot;: \&quot;DOC#d2\&quot;}, \&quot;title\&quot;: {\&quot;S\&quot;: \&quot;Old draft\&quot;}, \&quot;expiresAt\&quot;: {\&quot;N\&quot;: \&quot;1795088918\&quot;}}&quot;
+}
+</code></pre></div>
+<p>After the soft delete, "Old draft" vanishes from the folder listing without any filter on the index query, yet a <code>GetItem</code> by key still finds it with its <code>deletedAt</code> and <code>expiresAt</code> (30 days out). When it is finally deleted, the stream consumer archives the old image. Here it reports <code>deleted by TTL: False</code> because we deleted it ourselves. On AWS, a real TTL expiry would report <code>True</code>.</p>
+<h3 id="why_3">Why</h3>
+<ul>
+<li><strong>Undo for free.</strong> Nothing is lost until the retention window ends.</li>
+<li><strong>Queries stay clean.</strong> Index queries need no <code>deletedAt</code> filter, because the item simply isn't in the index.</li>
+<li><strong>Cheap long-term storage.</strong> S3 costs a fraction of DynamoDB storage, and TTL deletes consume no write capacity.</li>
+</ul>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li>Base-table queries on the item collection <em>will</em> still return soft-deleted items. Filter on <code>attribute_not_exists(deletedAt)</code> there, or move deleted items to a different SK prefix (e.g. <code>DELETED#META</code>).</li>
+<li>Unique constraints (<a href="../05-consistency/#26--unique-constraints-on-non-key-attributes">26 · Unique constraints</a>) must decide whether a soft-deleted item still "owns" its unique value.</li>
+<li>The archive is eventually consistent with the table.</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li>The stream view type must include the old image (<code>OLD_IMAGE</code> or <code>NEW_AND_OLD_IMAGES</code>), or there is nothing to archive.</li>
+<li>Tell TTL deletes apart from user deletes with <code>record["userIdentity"]["principalId"] == "dynamodb.amazonaws.com"</code> (and <code>type == "Service"</code>).</li>
+<li><strong>Local simulation:</strong> DynamoDB Local accepts <code>UpdateTimeToLive</code> but never actually expires items. The script hard-deletes with <code>DeleteItem</code> instead, and writes the archive into a dict rather than S3.</li>
+</ul>
+<hr />
+<p>Next up: <a href="../07-performance-and-scale/">07 - Performance &amp; scale</a>, where we look at what happens when too much traffic lands on too few keys.</p>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/05-consistency/">05 - Consistency &amp; concurrency</a> | <a href="/posts/08-dynamodb-patterns/07-performance-and-scale/">07 - Performance &amp; scale</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

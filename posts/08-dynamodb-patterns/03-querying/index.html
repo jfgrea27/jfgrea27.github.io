@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 - Querying</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>03 - Querying</h1>
+<p><small>2026-10-20</small></p>
+<p>Once the keys are designed, the next question is how to read the data efficiently. The one fact to hold on to is that DynamoDB charges for what it <strong>reads</strong>, not what it <strong>returns</strong>. Most of this page is about making those two numbers the same. The rest is about handling the API's paging and batching behaviour correctly.</p>
+<p>In short: <strong>query, don't scan</strong>. <code>Query</code> reads one partition, while <code>Scan</code> reads the whole table, so parallel Scan is for batch jobs only. <strong>Filters don't save money</strong>, because a <code>FilterExpression</code> runs after the read, so selectivity belongs in the key. <strong>Everything is paged</strong>: responses stop at 1 MB or at <code>Limit</code>, so we follow <code>LastEvaluatedKey</code> and expose it to API clients as an opaque cursor. <strong>Index projections are a choice</strong>: <code>KEYS_ONLY</code>, <code>INCLUDE</code> or <code>ALL</code> trades index storage and write cost against follow-up reads. And <strong>batch calls can partially fail</strong>: <code>BatchWriteItem</code> and <code>BatchGetItem</code> return unprocessed items, which we must retry with backoff.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>What we'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>12</td>
+<td><a href="#12--avoid-scan-use-parallel-scan-for-batch-jobs">Avoid Scan (parallel Scan for batch jobs)</a></td>
+<td>The cost difference between Scan and Query; segmented parallel scans</td>
+</tr>
+<tr>
+<td>13</td>
+<td><a href="#13--filter-expressions-dont-reduce-cost">Filter expressions don't reduce cost</a></td>
+<td>Measuring read units for filters vs key conditions; the <code>Limit</code> + filter trap</td>
+</tr>
+<tr>
+<td>14</td>
+<td><a href="#14--pagination-with-cursors">Pagination with cursors</a></td>
+<td><code>LastEvaluatedKey</code>, opaque API cursors, boto3 paginators</td>
+</tr>
+<tr>
+<td>15</td>
+<td><a href="#15--gsi-projections">GSI projections</a></td>
+<td>What each projection type returns and costs</td>
+</tr>
+<tr>
+<td>16</td>
+<td><a href="#16--batch-operations-with-retries">Batch operations with retries</a></td>
+<td>Chunking to 25/100, retrying unprocessed items, <code>batch_writer()</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="12--avoid-scan-use-parallel-scan-for-batch-jobs">12 · Avoid Scan (use parallel Scan for batch jobs)</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/03-querying/12-avoid-scan-parallel-scan/12-avoid-scan-parallel-scan.py">12-avoid-scan-parallel-scan.py</a> · run with <code>just run 12</code></p>
+<h3 id="problem">Problem</h3>
+<p><code>Scan</code> reads <strong>every item in the table</strong>, and only then applies any filter. Its cost and latency grow with the size of the table, not with the size of the result. In the script below, finding one user's 5 orders with a Scan reads 1,000 items. A Query reads 5.</p>
+<h3 id="pattern">Pattern</h3>
+<p><strong>In request paths, we use <code>Query</code> or <code>GetItem</code> only.</strong> If an access pattern seems to need a Scan, that's a sign we're missing a key or a GSI that serves it (see <a href="../02-modelling/#02--access-pattern-first-design">access-pattern-first design</a> and <a href="../02-modelling/#09--gsi-overloading">GSI overloading</a>).</p>
+<p><strong>For batch jobs</strong> (migrations, backfills, re-indexing, one-off exports), we use a <strong>parallel scan</strong>:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span><span class="o">.</span><span class="n">scan</span><span class="p">(</span><span class="n">Segment</span><span class="o">=</span><span class="n">i</span><span class="p">,</span> <span class="n">TotalSegments</span><span class="o">=</span><span class="n">N</span><span class="p">)</span>  <span class="c1"># one worker per segment</span>
+</code></pre></div>
+<p>Each worker scans a disjoint slice of the table and pages through it with <code>LastEvaluatedKey</code>.</p>
+<h3 id="in-practice">In practice</h3>
+<p>The script writes 200 users with 5 orders each (1,000 items), then looks for <code>USER#42</code>'s orders two ways, and finally runs a 4-segment parallel scan over the whole table:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># Bad: find one user&#39;s orders by scanning the whole table.</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">scan</span><span class="p">(</span><span class="n">FilterExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#42&quot;</span><span class="p">),</span> <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">)</span>
+
+<span class="c1"># Good: Query reads only that partition.</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#42&quot;</span><span class="p">),</span> <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">)</span>
+
+<span class="c1"># Batch job (export, migration, backfill): parallel scan split into segments.</span>
+<span class="n">TOTAL_SEGMENTS</span> <span class="o">=</span> <span class="mi">4</span>
+
+<span class="k">def</span> <span class="nf">scan_segment</span><span class="p">(</span><span class="n">segment</span><span class="p">):</span>
+    <span class="n">count</span><span class="p">,</span> <span class="n">kwargs</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;Segment&quot;</span><span class="p">:</span> <span class="n">segment</span><span class="p">,</span> <span class="s2">&quot;TotalSegments&quot;</span><span class="p">:</span> <span class="n">TOTAL_SEGMENTS</span><span class="p">}</span>
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="n">page</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">scan</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+        <span class="n">count</span> <span class="o">+=</span> <span class="n">page</span><span class="p">[</span><span class="s2">&quot;Count&quot;</span><span class="p">]</span>
+        <span class="k">if</span> <span class="s2">&quot;LastEvaluatedKey&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">page</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">count</span>
+        <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;ExclusiveStartKey&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">page</span><span class="p">[</span><span class="s2">&quot;LastEvaluatedKey&quot;</span><span class="p">]</span>
+
+<span class="k">with</span> <span class="n">ThreadPoolExecutor</span><span class="p">(</span><span class="n">max_workers</span><span class="o">=</span><span class="n">TOTAL_SEGMENTS</span><span class="p">)</span> <span class="k">as</span> <span class="n">pool</span><span class="p">:</span>
+    <span class="n">per_segment</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">pool</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">scan_segment</span><span class="p">,</span> <span class="nb">range</span><span class="p">(</span><span class="n">TOTAL_SEGMENTS</span><span class="p">)))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Scan p12-avoid-scan
+    filter:     PK = &#39;USER#42&#39;
+
+=== Scan + filter for USER#42 ===
+{
+  &quot;returned&quot;: 5,
+  &quot;examined&quot;: 1000,
+  &quot;consumed&quot;: {
+    &quot;TableName&quot;: &quot;p12-avoid-scan&quot;,
+    &quot;CapacityUnits&quot;: 3.5
+  }
+}
+
+&gt;&gt;&gt; Query p12-avoid-scan
+    key:        PK = &#39;USER#42&#39;
+
+=== Query for USER#42 ===
+{
+  &quot;returned&quot;: 5,
+  &quot;examined&quot;: 5,
+  &quot;consumed&quot;: {
+    &quot;TableName&quot;: &quot;p12-avoid-scan&quot;,
+    &quot;CapacityUnits&quot;: 0.5
+  }
+}
+
+&gt;&gt;&gt; Scan p12-avoid-scan
+    Segment:    0
+    TotalSegments: 4
+
+&gt;&gt;&gt; Scan p12-avoid-scan
+    Segment:    1
+    TotalSegments: 4
+
+&gt;&gt;&gt; Scan p12-avoid-scan
+    Segment:    2
+    TotalSegments: 4
+    ... (+1 more Scan calls not shown)
+
+=== Parallel scan: items per segment ===
+{
+  &quot;segments&quot;: [
+    210,
+    245,
+    275,
+    270
+  ],
+  &quot;total&quot;: 1000
+}
+</code></pre></div>
+<p>Both requests return the same 5 items, but the Scan examined 1,000 of them and consumed 7x the capacity. That gap only widens as the table grows. The parallel scan splits the table into 4 roughly equal, non-overlapping segments that together cover all 1,000 items exactly once.</p>
+<h3 id="why">Why</h3>
+<ul>
+<li>A Query costs about the same on a 1 GB table as on a 10 TB one. A Scan does not.</li>
+<li>A big Scan can use up all of the table's capacity and throttle production traffic.</li>
+<li>A parallel scan finishes a full-table job N times faster.</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<ul>
+<li>A parallel scan also uses capacity N times faster. We should rate-limit it, run it off-peak, or use on-demand mode.</li>
+<li>For analytics or full exports, <strong>Export to S3</strong> costs no table capacity at all (see <a href="../08-operations/#41--analytics-outside-dynamodb">analytics outside DynamoDB</a>).</li>
+</ul>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li>Each Scan page returns at most 1 MB, so we always loop on <code>LastEvaluatedKey</code> (see <a href="#14--pagination-with-cursors">pagination</a>).</li>
+<li>A <code>FilterExpression</code> doesn't reduce what we pay for (see <a href="#13--filter-expressions-dont-reduce-cost">the next pattern</a>).</li>
+<li>A Scan is not a point-in-time snapshot. Items written while it runs may or may not appear.</li>
+<li>Small, bounded tables (say, a config table with 50 rows) are fine to scan.</li>
+</ul>
+<h2 id="13--filter-expressions-dont-reduce-cost">13 · Filter expressions don't reduce cost</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/03-querying/13-filter-expressions-cost/13-filter-expressions-cost.py">13-filter-expressions-cost.py</a> · run with <code>just run 13</code></p>
+<h3 id="problem_1">Problem</h3>
+<p><code>FilterExpression</code> looks like a SQL <code>WHERE</code>, but it runs <strong>after</strong> the read. We pay for every item the key condition matched, even the ones the filter then throws away. In the script, fetching "open orders" with a filter reads 1,000 items (~127 RCUs) to return 10.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>Put the selectivity in the <strong>key</strong>, so the key condition only touches the items we actually want. Here each order is also written under a status-prefixed sort key:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CUSTOMER#c1</code></td>
+<td><code>ORDER#0000</code></td>
+</tr>
+<tr>
+<td><code>CUSTOMER#c1</code></td>
+<td><code>STATUS#OPEN#ORDER#0000</code></td>
+</tr>
+<tr>
+<td><code>CUSTOMER#c1</code></td>
+<td><code>STATUS#SHIPPED#ORDER#0001</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>Query(PK=CUSTOMER#c1, SK begins_with STATUS#OPEN#)</code> then reads only the 10 open orders (~1.5 RCUs).</p>
+<p>There are other ways to achieve the same thing:</p>
+<ul>
+<li><a href="../02-modelling/#05--composite-hierarchical-sort-keys">Composite sort keys</a>.</li>
+<li>A GSI keyed on the attribute (see <a href="../02-modelling/#09--gsi-overloading">GSI overloading</a>).</li>
+<li>A <a href="../02-modelling/#10--sparse-index">sparse index</a> that only holds the matching items.</li>
+</ul>
+<h3 id="in-practice_1">In practice</h3>
+<p>The script writes 1,000 orders of ~1 KB each for one customer, only 10 of them <code>OPEN</code>, and a second copy of each keyed by status. A small <code>query_all</code> helper pages through results and sums up <code>Count</code>, <code>ScannedCount</code> and consumed capacity:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">show</span><span class="p">(</span>
+    <span class="s2">&quot;FilterExpression status=OPEN (reads everything, then discards)&quot;</span><span class="p">,</span>
+    <span class="n">query_all</span><span class="p">(</span>
+        <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;CUSTOMER#c1&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;ORDER#&quot;</span><span class="p">),</span>
+        <span class="n">FilterExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;OPEN&quot;</span><span class="p">),</span>
+    <span class="p">),</span>
+<span class="p">)</span>
+<span class="n">show</span><span class="p">(</span>
+    <span class="s2">&quot;KeyCondition SK begins_with STATUS#OPEN# (reads only matches)&quot;</span><span class="p">,</span>
+    <span class="n">query_all</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;CUSTOMER#c1&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;STATUS#OPEN#&quot;</span><span class="p">)),</span>
+<span class="p">)</span>
+
+<span class="c1"># Limit applies BEFORE the filter: you can get 0 results and still have more pages.</span>
+<span class="n">page</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;CUSTOMER#c1&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;ORDER#&quot;</span><span class="p">),</span>
+    <span class="n">FilterExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;OPEN&quot;</span><span class="p">),</span>
+    <span class="n">Limit</span><span class="o">=</span><span class="mi">50</span><span class="p">,</span>
+    <span class="n">ExclusiveStartKey</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;CUSTOMER#c1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;ORDER#0001&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p13-filter-cost
+    key:        (PK = &#39;CUSTOMER#c1&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+    filter:     status = &#39;OPEN&#39;
+
+=== FilterExpression status=OPEN (reads everything, then discards) ===
+{
+  &quot;returned&quot;: 10,
+  &quot;read&quot;: 1000,
+  &quot;RCUs&quot;: 127.5
+}
+
+&gt;&gt;&gt; Query p13-filter-cost
+    key:        (PK = &#39;CUSTOMER#c1&#39; AND begins_with(SK, &#39;STATUS#OPEN#&#39;))
+
+=== KeyCondition SK begins_with STATUS#OPEN# (reads only matches) ===
+{
+  &quot;returned&quot;: 10,
+  &quot;read&quot;: 10,
+  &quot;RCUs&quot;: 1.5
+}
+
+&gt;&gt;&gt; Query p13-filter-cost
+    key:        (PK = &#39;CUSTOMER#c1&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+    filter:     status = &#39;OPEN&#39;
+    Limit:      50
+    startKey:   {PK: &#39;CUSTOMER#c1&#39;, SK: &#39;ORDER#0001&#39;}
+
+=== Limit=50 + filter ===
+{
+  &quot;returned&quot;: 0,
+  &quot;read&quot;: 50,
+  &quot;more&quot;: true
+}
+</code></pre></div>
+<p>The same 10 orders cost 127.5 RCUs with a filter and 1.5 RCUs with the selectivity in the key, an 85x difference. The last request shows the <code>Limit</code> trap: DynamoDB read 50 items, the filter dropped all of them, and we got back an empty page that still says there's more to read.</p>
+<h3 id="why_1">Why</h3>
+<p>Cost and latency follow the items <strong>read</strong>, not the items returned.</p>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<ul>
+<li>Extra keys or GSIs cost writes and storage, and must be kept in sync when the status changes.</li>
+<li>Filters are <strong>fine</strong> when they drop only a small share of what we read, e.g. hiding <a href="../06-lifecycle-and-events/#30--ttl-for-expiry">TTL-expired</a> or <a href="../06-lifecycle-and-events/#33--soft-delete--archival">soft-deleted</a> items.</li>
+</ul>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li><strong><code>Limit</code> applies before the filter.</strong> A page can come back with 0 items and still have a <code>LastEvaluatedKey</code>, so we keep paging until it's gone (see <a href="#14--pagination-with-cursors">pagination</a>).</li>
+<li>The 1 MB page size is also measured before the filter.</li>
+<li>Comparing <code>ScannedCount</code> with <code>Count</code> in the response tells us how much a filter wasted. It's worth logging.</li>
+</ul>
+<h2 id="14--pagination-with-cursors">14 · Pagination with cursors</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/03-querying/14-pagination-cursors/14-pagination-cursors.py">14-pagination-cursors.py</a> · run with <code>just run 14</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>A Query or Scan returns at most 1 MB (or <code>Limit</code> items) per call. DynamoDB has no <code>OFFSET</code>, so "page 7" can't be computed. We can only continue from where the last page stopped.</p>
+<h3 id="pattern_2">Pattern</h3>
+<ul>
+<li>Each response includes <code>LastEvaluatedKey</code> when there's more data. We pass it back as <code>ExclusiveStartKey</code> on the next call.</li>
+<li>For APIs, we <strong>encode it as an opaque cursor</strong> (base64 JSON, ideally signed or encrypted) and return it as <code>nextCursor</code>.</li>
+<li>No <code>LastEvaluatedKey</code> means we've reached the last page.</li>
+</ul>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=...</span><span class="p">,</span> <span class="n">Limit</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">ExclusiveStartKey</span><span class="o">=</span><span class="n">start</span><span class="p">)</span>
+<span class="n">next_cursor</span> <span class="o">=</span> <span class="n">encode</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;LastEvaluatedKey&quot;</span><span class="p">))</span>
+</code></pre></div>
+<p>In batch code, boto3 paginators (<code>client.get_paginator("query")</code>) run this loop for us.</p>
+<h3 id="in-practice_2">In practice</h3>
+<p>The script writes 23 posts to one feed and pages through them 10 at a time, the way an API handler would: cursor in, items and next cursor out. It then does the same with a boto3 paginator:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">encode_cursor</span><span class="p">(</span><span class="n">last_key</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">base64</span><span class="o">.</span><span class="n">urlsafe_b64encode</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">last_key</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span> <span class="k">if</span> <span class="n">last_key</span> <span class="k">else</span> <span class="kc">None</span>
+
+
+<span class="k">def</span> <span class="nf">list_posts</span><span class="p">(</span><span class="n">cursor</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">page_size</span><span class="o">=</span><span class="mi">10</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;What an API handler looks like: cursor in, items + next cursor out.&quot;&quot;&quot;</span>
+    <span class="n">kwargs</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;KeyConditionExpression&quot;</span><span class="p">:</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;FEED#news&quot;</span><span class="p">),</span> <span class="s2">&quot;Limit&quot;</span><span class="p">:</span> <span class="n">page_size</span><span class="p">}</span>
+    <span class="n">start</span> <span class="o">=</span> <span class="n">decode_cursor</span><span class="p">(</span><span class="n">cursor</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">start</span><span class="p">:</span>
+        <span class="c1"># In real code: check the decoded key belongs to this PK (don&#39;t trust clients).</span>
+        <span class="k">if</span> <span class="n">start</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">&quot;FEED#news&quot;</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;invalid cursor&quot;</span><span class="p">)</span>
+        <span class="n">kwargs</span><span class="p">[</span><span class="s2">&quot;ExclusiveStartKey&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">start</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s2">&quot;items&quot;</span><span class="p">:</span> <span class="p">[</span><span class="n">i</span><span class="p">[</span><span class="s2">&quot;title&quot;</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;Items&quot;</span><span class="p">]],</span>
+        <span class="s2">&quot;nextCursor&quot;</span><span class="p">:</span> <span class="n">encode_cursor</span><span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;LastEvaluatedKey&quot;</span><span class="p">)),</span>
+    <span class="p">}</span>
+
+<span class="c1"># boto3 paginators do the LastEvaluatedKey loop for you.</span>
+<span class="n">paginator</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">get_paginator</span><span class="p">(</span><span class="s2">&quot;query&quot;</span><span class="p">)</span>
+<span class="n">pages</span> <span class="o">=</span> <span class="n">paginator</span><span class="o">.</span><span class="n">paginate</span><span class="p">(</span>
+    <span class="n">TableName</span><span class="o">=</span><span class="n">table</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="s2">&quot;PK = :pk&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:pk&quot;</span><span class="p">:</span> <span class="s2">&quot;FEED#news&quot;</span><span class="p">},</span>
+    <span class="n">PaginationConfig</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PageSize&quot;</span><span class="p">:</span> <span class="mi">10</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p14-pagination
+    key:        PK = &#39;FEED#news&#39;
+    Limit:      10
+
+=== Page 1 ===
+{
+  &quot;items&quot;: [
+    &quot;Post 0&quot;,
+    &quot;Post 1&quot;,
+    ...
+    &quot;Post 9&quot;
+  ],
+  &quot;nextCursor&quot;: &quot;eyJTSyI6ICJQT1NUIzAwOSIsICJQSyI6ICJGRUVEI25ld3MifQ==&quot;
+}
+
+&gt;&gt;&gt; Query p14-pagination
+    key:        PK = &#39;FEED#news&#39;
+    Limit:      10
+    startKey:   {SK: &#39;POST#009&#39;, PK: &#39;FEED#news&#39;}
+
+=== Page 2 ===
+{
+  &quot;items&quot;: [
+    &quot;Post 10&quot;,
+    &quot;Post 11&quot;,
+    ...
+    &quot;Post 19&quot;
+  ],
+  &quot;nextCursor&quot;: &quot;eyJTSyI6ICJQT1NUIzAxOSIsICJQSyI6ICJGRUVEI25ld3MifQ==&quot;
+}
+
+&gt;&gt;&gt; Query p14-pagination
+    key:        PK = &#39;FEED#news&#39;
+    Limit:      10
+    startKey:   {SK: &#39;POST#019&#39;, PK: &#39;FEED#news&#39;}
+
+=== Page 3 ===
+{
+  &quot;items&quot;: [
+    &quot;Post 20&quot;,
+    &quot;Post 21&quot;,
+    &quot;Post 22&quot;
+  ],
+  &quot;nextCursor&quot;: null
+}
+
+=== Paginator page sizes ===
+[
+  10,
+  10,
+  3
+]
+</code></pre></div>
+<p>Each <code>nextCursor</code> is just the base64 of the last key on the page (<code>{"SK": "POST#009", "PK": "FEED#news"}</code>), and we can see it come back as <code>startKey</code> on the next request. The third page has no <code>LastEvaluatedKey</code>, so <code>nextCursor</code> is <code>null</code>. The paginator makes the same three requests (not repeated above) and gives the same 10/10/3 split.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li><strong>Constant cost per page.</strong> Page 1,000 costs the same as page 1. Offset pagination gets slower the deeper we go.</li>
+<li><strong>Stable under inserts.</strong> New items don't shift or duplicate the next page.</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li>We can only go forward, and we can't jump to page N. (We can go backward by reversing <code>ScanIndexForward</code> from a cursor.) "Load more" or infinite-scroll UIs fit this well.</li>
+<li>There's <strong>no total count</strong> without reading everything. If we need one, we keep a separate <a href="../05-consistency/#24--atomic-counters">atomic counter</a>.</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>The cursor contains key values, which may include IDs or emails. <strong>We shouldn't trust it from clients.</strong> Check it belongs to the partition being queried (as <code>list_posts</code> does), and consider encrypting it.</li>
+<li>On a GSI, <code>LastEvaluatedKey</code> includes both the index keys and the table keys. Pass it back unchanged.</li>
+<li>With a <code>FilterExpression</code>, pages can be short or empty while more data remains (see <a href="#13--filter-expressions-dont-reduce-cost">the previous pattern</a>).</li>
+<li>For newest-first feeds, combine <a href="../02-modelling/#06--sortable-ids-latest-first">sortable keys</a> with <code>ScanIndexForward=False</code>.</li>
+</ul>
+<h2 id="15--gsi-projections">15 · GSI projections</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/03-querying/15-gsi-projections/15-gsi-projections.py">15-gsi-projections.py</a> · run with <code>just run 15</code></p>
+<h3 id="problem_3">Problem</h3>
+<p>A GSI is a separate copy of our data, and the projection decides which attributes get copied into it. Copying too much costs storage, plus write capacity on every update. Copying too little forces an extra read for each result.</p>
+<h3 id="pattern_3">Pattern</h3>
+<p>We choose the projection per index, based on what that access pattern needs to return:</p>
+<table>
+<thead>
+<tr>
+<th>Projection</th>
+<th>Copies</th>
+<th>Use when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KEYS_ONLY</code></td>
+<td>table + index keys</td>
+<td>We only need IDs, or we'll <code>BatchGetItem</code> a few results.</td>
+</tr>
+<tr>
+<td><code>INCLUDE</code></td>
+<td>keys + named attributes</td>
+<td>List views needing a few fields (customer, total).</td>
+</tr>
+<tr>
+<td><code>ALL</code></td>
+<td>everything</td>
+<td>The index serves full-item reads, or items are small.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice_3">In practice</h3>
+<p>The script builds all three projections over the same orders, each of which carries a large <code>lineItems</code> blob that a list view never needs:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span> <span class="o">=</span> <span class="n">recreate_table</span><span class="p">(</span>
+    <span class="s2">&quot;p15-gsi-projections&quot;</span><span class="p">,</span>
+    <span class="n">gsis</span><span class="o">=</span><span class="p">[</span>
+        <span class="n">gsi</span><span class="p">(</span><span class="s2">&quot;ByStatusKeys&quot;</span><span class="p">,</span> <span class="n">pk</span><span class="o">=</span><span class="s2">&quot;status&quot;</span><span class="p">,</span> <span class="n">sk</span><span class="o">=</span><span class="s2">&quot;createdAt&quot;</span><span class="p">,</span> <span class="n">projection</span><span class="o">=</span><span class="s2">&quot;KEYS_ONLY&quot;</span><span class="p">),</span>
+        <span class="n">gsi</span><span class="p">(</span><span class="s2">&quot;ByStatusInclude&quot;</span><span class="p">,</span> <span class="n">pk</span><span class="o">=</span><span class="s2">&quot;status&quot;</span><span class="p">,</span> <span class="n">sk</span><span class="o">=</span><span class="s2">&quot;createdAt&quot;</span><span class="p">,</span> <span class="n">projection</span><span class="o">=</span><span class="s2">&quot;INCLUDE&quot;</span><span class="p">,</span> <span class="n">include</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;customer&quot;</span><span class="p">,</span> <span class="s2">&quot;total&quot;</span><span class="p">]),</span>
+        <span class="n">gsi</span><span class="p">(</span><span class="s2">&quot;ByStatusAll&quot;</span><span class="p">,</span> <span class="n">pk</span><span class="o">=</span><span class="s2">&quot;status&quot;</span><span class="p">,</span> <span class="n">sk</span><span class="o">=</span><span class="s2">&quot;createdAt&quot;</span><span class="p">,</span> <span class="n">projection</span><span class="o">=</span><span class="s2">&quot;ALL&quot;</span><span class="p">),</span>
+    <span class="p">],</span>
+<span class="p">)</span>
+
+<span class="k">for</span> <span class="n">index</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;ByStatusKeys&quot;</span><span class="p">,</span> <span class="s2">&quot;ByStatusInclude&quot;</span><span class="p">,</span> <span class="s2">&quot;ByStatusAll&quot;</span><span class="p">]:</span>
+    <span class="n">item</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">IndexName</span><span class="o">=</span><span class="n">index</span><span class="p">,</span> <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;OPEN&quot;</span><span class="p">),</span> <span class="n">Limit</span><span class="o">=</span><span class="mi">1</span><span class="p">)[</span><span class="s2">&quot;Items&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">show</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">: attributes returned&quot;</span><span class="p">,</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">item</span><span class="p">))</span>
+
+<span class="c1"># KEYS_ONLY needs a second round trip to get the rest of the item.</span>
+<span class="n">keys</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">IndexName</span><span class="o">=</span><span class="s2">&quot;ByStatusKeys&quot;</span><span class="p">,</span> <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;status&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;OPEN&quot;</span><span class="p">))[</span><span class="s2">&quot;Items&quot;</span><span class="p">]</span>
+<span class="n">full</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">batch_get_item</span><span class="p">(</span><span class="n">RequestItems</span><span class="o">=</span><span class="p">{</span><span class="n">table</span><span class="o">.</span><span class="n">name</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;Keys&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="n">k</span><span class="p">[</span><span class="s2">&quot;PK&quot;</span><span class="p">],</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="n">k</span><span class="p">[</span><span class="s2">&quot;SK&quot;</span><span class="p">]}</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">keys</span><span class="p">],</span> <span class="o">...</span><span class="p">}})</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p15-gsi-projections
+    key:        status = &#39;OPEN&#39;
+    IndexName:  ByStatusKeys
+    Limit:      1
+
+=== ByStatusKeys: attributes returned ===
+[
+  &quot;PK&quot;,
+  &quot;SK&quot;,
+  &quot;createdAt&quot;,
+  &quot;status&quot;
+]
+
+&gt;&gt;&gt; Query p15-gsi-projections
+    key:        status = &#39;OPEN&#39;
+    IndexName:  ByStatusInclude
+    Limit:      1
+
+=== ByStatusInclude: attributes returned ===
+[
+  &quot;PK&quot;,
+  &quot;SK&quot;,
+  &quot;createdAt&quot;,
+  &quot;customer&quot;,
+  &quot;status&quot;,
+  &quot;total&quot;
+]
+
+&gt;&gt;&gt; Query p15-gsi-projections
+    key:        status = &#39;OPEN&#39;
+    IndexName:  ByStatusAll
+    Limit:      1
+
+=== ByStatusAll: attributes returned ===
+[
+  &quot;PK&quot;,
+  &quot;SK&quot;,
+  &quot;createdAt&quot;,
+  &quot;customer&quot;,
+  &quot;lineItems&quot;,
+  &quot;status&quot;,
+  &quot;total&quot;
+]
+
+&gt;&gt;&gt; Query p15-gsi-projections
+    key:        status = &#39;OPEN&#39;
+    IndexName:  ByStatusKeys
+
+&gt;&gt;&gt; BatchGetItem
+    p15-gsi-projections: 5 keys, e.g. {PK: &#39;ORDER#0&#39;, SK: &#39;ORDER&#39;}
+
+=== KEYS_ONLY + BatchGetItem (2nd request) ===
+5
+
+=== Index sizes (Local reports the same number for each; on AWS ALL &gt; INCLUDE &gt; KEYS_ONLY) ===
+{
+  &quot;ByStatusInclude&quot;: 6124,
+  &quot;ByStatusAll&quot;: 6124,
+  &quot;ByStatusKeys&quot;: 6124
+}
+</code></pre></div>
+<p><code>KEYS_ONLY</code> returns just the table and index keys. <code>INCLUDE</code> adds exactly the <code>customer</code> and <code>total</code> we asked for. <code>ALL</code> drags <code>lineItems</code> along too. To show the full order from the <code>KEYS_ONLY</code> index we need the second <code>BatchGetItem</code> round trip. The index sizes at the end are identical only because DynamoDB Local doesn't track them per index.</p>
+<h3 id="why_3">Why</h3>
+<ul>
+<li><strong>Write cost.</strong> A table write also writes to each GSI whose projected attributes changed. With <code>ALL</code>, updating a large blob that no index queries on is still copied into the index.</li>
+<li><strong>Storage.</strong> Large, rarely needed attributes (<code>lineItems</code>, descriptions) shouldn't be copied into every index.</li>
+</ul>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li><strong>We can't change a GSI's projection.</strong> We have to create a new index and drop the old one. If unsure, <code>ALL</code> is the safe default for small items.</li>
+<li><code>KEYS_ONLY</code> plus a fetch costs an extra round trip and extra RCUs per result.</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li>Querying a GSI for an attribute that isn't projected returns the item <strong>without</strong> that attribute. There's no error, so it's easy to miss.</li>
+<li><a href="../02-modelling/#10--sparse-index">Sparse indexes</a> and <a href="../02-modelling/#09--gsi-overloading">overloaded GSIs</a> multiply these savings.</li>
+<li>DynamoDB Local reports the same <code>IndexSizeBytes</code> for every index, as we saw above. On AWS, look at <code>IndexSizeBytes</code> in <code>DescribeTable</code> (updated about every 6 hours).</li>
+</ul>
+<h2 id="16--batch-operations-with-retries">16 · Batch operations with retries</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/03-querying/16-batch-retries/16-batch-retries.py">16-batch-retries.py</a> · run with <code>just run 16</code></p>
+<h3 id="problem_4">Problem</h3>
+<p><code>BatchWriteItem</code> and <code>BatchGetItem</code> save round trips, but they can <strong>partly succeed</strong>. If some items are throttled or the response is too big, the call still returns HTTP 200 and lists the leftovers in <code>UnprocessedItems</code> / <code>UnprocessedKeys</code>. Code that ignores them silently loses writes or misses reads.</p>
+<h3 id="pattern_4">Pattern</h3>
+<ol>
+<li><strong>Chunk</strong> to the API limits: 25 puts/deletes per <code>BatchWriteItem</code> (16 MB max), and 100 keys per <code>BatchGetItem</code> (16 MB max).</li>
+<li>After every call, <strong>resend only the unprocessed part</strong>.</li>
+<li>Wait between retries with <strong>exponential backoff and jitter</strong>, and give up after N attempts.</li>
+</ol>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">for</span> <span class="n">attempt</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_attempts</span><span class="p">):</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">batch_write_item</span><span class="p">(</span><span class="n">RequestItems</span><span class="o">=</span><span class="n">request</span><span class="p">)</span>
+    <span class="n">request</span> <span class="o">=</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;UnprocessedItems&quot;</span><span class="p">]</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">request</span><span class="p">:</span>
+        <span class="k">break</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="nb">min</span><span class="p">(</span><span class="n">cap</span><span class="p">,</span> <span class="n">base</span> <span class="o">*</span> <span class="mi">2</span><span class="o">**</span><span class="n">attempt</span><span class="p">)</span> <span class="o">*</span> <span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+</code></pre></div>
+<p>For writes, boto3's <code>Table.batch_writer()</code> already chunks to 25 and resends unprocessed items for us. Its <code>overwrite_by_pkeys</code> option drops duplicate keys within a batch, which would otherwise fail validation. There's no equivalent helper for <code>BatchGetItem</code>, so there we write the loop ourselves.</p>
+<h3 id="in-practice_4">In practice</h3>
+<p>DynamoDB Local never throttles, so the script wraps <code>batch_write_item</code> in a <code>flaky_batch_write</code> that pretends the first call left a third of the items unprocessed. A generic <code>with_backoff</code> helper retries whatever comes back unprocessed:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">with_backoff</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">unprocessed_key</span><span class="p">,</span> <span class="n">max_attempts</span><span class="o">=</span><span class="mi">8</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Call a batch API, retrying only what came back unprocessed, with jittered exponential backoff.&quot;&quot;&quot;</span>
+    <span class="n">responses</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">attempt</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">max_attempts</span><span class="p">):</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="n">call</span><span class="p">(</span><span class="n">RequestItems</span><span class="o">=</span><span class="n">request</span><span class="p">)</span>
+        <span class="n">responses</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">resp</span><span class="p">)</span>
+        <span class="n">request</span> <span class="o">=</span> <span class="p">{</span><span class="n">t</span><span class="p">:</span> <span class="n">r</span> <span class="k">for</span> <span class="n">t</span><span class="p">,</span> <span class="n">r</span> <span class="ow">in</span> <span class="p">(</span><span class="n">resp</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">unprocessed_key</span><span class="p">)</span> <span class="ow">or</span> <span class="p">{})</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">r</span><span class="p">}</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">request</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">responses</span>
+        <span class="n">delay</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="mf">2.0</span><span class="p">,</span> <span class="mf">0.05</span> <span class="o">*</span> <span class="mi">2</span> <span class="o">**</span> <span class="p">(</span><span class="n">attempt</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">*</span> <span class="n">random</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="mf">0.5</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">)</span>  <span class="c1"># capped, jittered</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  retry #</span><span class="si">{</span><span class="n">attempt</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2"> in </span><span class="si">{</span><span class="n">delay</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="n">delay</span><span class="p">)</span>
+    <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;still unprocessed after </span><span class="si">{</span><span class="n">max_attempts</span><span class="si">}</span><span class="s2"> attempts: </span><span class="si">{</span><span class="n">request</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+
+<span class="c1"># BatchWriteItem: 60 items -&gt; batches of 25/25/10</span>
+<span class="k">for</span> <span class="n">batch</span> <span class="ow">in</span> <span class="n">chunks</span><span class="p">(</span><span class="n">items</span><span class="p">,</span> <span class="n">MAX_BATCH_WRITE</span><span class="p">):</span>
+    <span class="n">request</span> <span class="o">=</span> <span class="p">{</span><span class="n">TABLE</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;PutRequest&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;Item&quot;</span><span class="p">:</span> <span class="n">it</span><span class="p">}}</span> <span class="k">for</span> <span class="n">it</span> <span class="ow">in</span> <span class="n">batch</span><span class="p">]}</span>
+    <span class="n">with_backoff</span><span class="p">(</span><span class="n">flaky_batch_write</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="s2">&quot;UnprocessedItems&quot;</span><span class="p">)</span>
+
+<span class="c1"># The easy way for writes: batch_writer() chunks to 25 and resends unprocessed items for you</span>
+<span class="k">with</span> <span class="n">dynamodb</span><span class="o">.</span><span class="n">Table</span><span class="p">(</span><span class="n">TABLE</span><span class="p">)</span><span class="o">.</span><span class="n">batch_writer</span><span class="p">(</span><span class="n">overwrite_by_pkeys</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;PK&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">])</span> <span class="k">as</span> <span class="n">w</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">60</span><span class="p">,</span> <span class="mi">130</span><span class="p">):</span>
+        <span class="n">w</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ITEM#</span><span class="si">{</span><span class="n">i</span><span class="si">:</span><span class="s2">03</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">,</span> <span class="s2">&quot;n&quot;</span><span class="p">:</span> <span class="n">i</span><span class="p">})</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>=== Writing 60 items in batches of 25 ===
+
+&gt;&gt;&gt; BatchWriteItem
+    p16-batch-retries: 25 puts, 0 deletes
+  (simulated) 8 items came back unprocessed
+  retry #1 in 0.06s
+
+&gt;&gt;&gt; BatchWriteItem
+    p16-batch-retries: 8 puts, 0 deletes
+  wrote batch of 25
+
+&gt;&gt;&gt; BatchWriteItem
+    p16-batch-retries: 25 puts, 0 deletes
+  wrote batch of 25
+  wrote batch of 10
+    ... (+1 more BatchWriteItem calls not shown)
+
+&gt;&gt;&gt; BatchGetItem
+    p16-batch-retries: 60 keys, e.g. {PK: &#39;ITEM#000&#39;, SK: &#39;META&#39;}
+
+=== Fetched back ===
+{
+  &quot;count&quot;: 60,
+  &quot;note&quot;: &quot;BatchGetItem returns items in no particular order&quot;
+}
+
+&gt;&gt;&gt; BatchWriteItem
+    p16-batch-retries: 25 puts, 0 deletes
+
+&gt;&gt;&gt; BatchWriteItem
+    p16-batch-retries: 25 puts, 0 deletes
+
+&gt;&gt;&gt; BatchWriteItem
+    p16-batch-retries: 20 puts, 0 deletes
+
+&gt;&gt;&gt; Scan p16-batch-retries
+    Select:     COUNT
+
+=== Items in table after batch_writer() added 70 more ===
+130
+</code></pre></div>
+<p>The first batch of 25 comes back with 8 unprocessed items, and the retry sends exactly those 8, not all 25. All 60 keys then come back in a single <code>BatchGetItem</code> (under the 100-key limit). Finally <code>batch_writer()</code> splits 70 puts into 25/25/20 on its own, leaving 130 items in the table.</p>
+<h3 id="why_4">Why</h3>
+<ul>
+<li><strong>Fewer round trips.</strong> One request instead of 25 or 100.</li>
+<li><strong>Correctness.</strong> The retry loop is what makes batches safe to use.</li>
+<li>Jittered backoff stops many clients from retrying in lockstep and making the throttling worse.</li>
+</ul>
+<h3 id="trade-offs_4">Trade-offs</h3>
+<ul>
+<li><strong>Not atomic.</strong> Some items can succeed while others fail. When it must be all-or-nothing, use <code>TransactWriteItems</code> (see <a href="../05-consistency/#25--transactions">transactions</a>).</li>
+<li><strong>Costs the same capacity</strong> as single calls. Batching saves latency, not money.</li>
+<li><code>BatchWriteItem</code> has no conditions or updates: only <code>PutRequest</code> (a full overwrite) and <code>DeleteRequest</code>.</li>
+</ul>
+<h3 id="gotchas_4">Gotchas</h3>
+<ul>
+<li>The same key twice in one batch raises a <code>ValidationException</code>.</li>
+<li><code>BatchGetItem</code> returns items <strong>in any order</strong>, so we match them up by key.</li>
+<li>Unprocessed items usually point to a hot partition or under-provisioned capacity (see <a href="../07-performance-and-scale/#35--write-sharding">write sharding</a> and <a href="../08-operations/#38--capacity-modes-on-demand-vs-provisioned">capacity modes</a>). Retrying hides the symptom, so we should alarm on throttling metrics too.</li>
+<li>The AWS SDKs also retry <em>throttling errors</em> themselves (<code>retries={"mode": "adaptive"}</code> in botocore's <code>Config</code>). That is separate from <code>Unprocessed*</code>, which we must always handle ourselves.</li>
+</ul>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/02-modelling/">02 - Modelling</a> | <a href="/posts/08-dynamodb-patterns/04-item-size/">04 - Item size &amp; large data</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

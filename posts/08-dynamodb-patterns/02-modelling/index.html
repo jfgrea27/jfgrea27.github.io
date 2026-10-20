@@ -1,0 +1,1243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 - Modelling</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>02 - Modelling</h1>
+<p><small>2026-10-20</small></p>
+<p>Modelling is the heart of DynamoDB. Everything comes down to one decision: <strong>what goes in the partition key, the sort key and the indexes</strong>, so that every access pattern the application needs is a single <code>GetItem</code> or <code>Query</code>. Most of the rest of the series builds on the patterns in this article.</p>
+<p>A few ideas run through all of them. <strong>Access patterns come first</strong>: we list the questions the app asks, then design keys to answer them, so the table's shape follows from the queries rather than the other way round. <strong>Keys are strings we design</strong>: prefixes (<code>USER#</code>, <code>ORDER#</code>) and composite values (<code>COUNTRY#STATE#CITY</code>) turn one key attribute into a flexible, sortable path. <strong>One table can hold many entities</strong>: items that are read together share a partition key, so one <code>Query</code> returns all of them (an <em>item collection</em>). <strong>Indexes give us more ways in</strong>: a GSI re-keys the same data, swapping PK and SK (an inverted index) answers the reverse question, generic <code>GSI1PK</code>/<code>GSI1SK</code> attributes let one index serve many patterns, and leaving the key off an item keeps it out of the index entirely (sparse). Finally, <strong>we duplicate on write to save reads</strong>: copying a value onto the items that need it is normal, as long as we have a plan for updating the copies.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>What we'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>02</td>
+<td><a href="#02--access-pattern-first-design">Access-pattern-first design</a></td>
+<td>Deriving a table and indexes from a list of queries</td>
+</tr>
+<tr>
+<td>03</td>
+<td><a href="#03--key-prefixes-and-key-overloading">Key prefixes and key overloading</a></td>
+<td><code>TYPE#id</code> keys, avoiding collisions, key-builder helpers</td>
+</tr>
+<tr>
+<td>04</td>
+<td><a href="#04--single-table-design">Single-table design</a></td>
+<td>Several entity types in one table; fetching related data in one query</td>
+</tr>
+<tr>
+<td>05</td>
+<td><a href="#05--composite-hierarchical-sort-keys">Composite sort keys</a></td>
+<td>Hierarchies with <code>begins_with</code>, ranges with <code>between</code></td>
+</tr>
+<tr>
+<td>06</td>
+<td><a href="#06--sortable-ids-latest-first">Sortable IDs, latest first</a></td>
+<td>ISO-8601 timestamps and ULIDs as sort keys; newest-first queries</td>
+</tr>
+<tr>
+<td>07</td>
+<td><a href="#07--inverted-index">Inverted index</a></td>
+<td>A GSI with PK/SK swapped to query relationships backwards</td>
+</tr>
+<tr>
+<td>08</td>
+<td><a href="#08--adjacency-list-many-to-many">Adjacency list</a></td>
+<td>Many-to-many relationships as edge items</td>
+</tr>
+<tr>
+<td>09</td>
+<td><a href="#09--gsi-overloading">GSI overloading</a></td>
+<td>One generic GSI serving several access patterns</td>
+</tr>
+<tr>
+<td>10</td>
+<td><a href="#10--sparse-index">Sparse index</a></td>
+<td>Indexes that only contain the items we care about</td>
+</tr>
+<tr>
+<td>11</td>
+<td><a href="#11--denormalization-and-duplication">Denormalization</a></td>
+<td>Copying and embedding data, and keeping copies in sync</td>
+</tr>
+</tbody>
+</table>
+<p>Every example below was run against DynamoDB Local. The <code>&gt;&gt;&gt;</code> lines are the actual requests each script sent, printed by the repo's request logger.</p>
+<hr />
+<h2 id="02--access-pattern-first-design">02 · Access-pattern-first design</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/02-access-pattern-first/02-access-pattern-first.py">02-access-pattern-first.py</a> · run with <code>just run 02</code></p>
+<h3 id="problem">Problem</h3>
+<p>In SQL we model the entities first and write the queries later, and the query planner sorts it out. DynamoDB has no planner. If a query isn't backed by a key or an index, the only option left is a <code>Scan</code>.</p>
+<h3 id="pattern">Pattern</h3>
+<p>We flip the order and work in three steps:</p>
+<ol>
+<li>Write down <strong>every</strong> read and write the app needs, with a rough frequency for each.</li>
+<li>For each one, decide which request will serve it: a <code>GetItem</code>, a <code>Query</code> on the table, or a <code>Query</code> on a GSI.</li>
+<li>Derive the <code>PK</code>/<code>SK</code> and GSI keys from that list, then check that nothing needs a <code>Scan</code>.</li>
+</ol>
+<p>For a simple customers-and-orders app, the list looks like this:</p>
+<table>
+<thead>
+<tr>
+<th>Access pattern</th>
+<th>Request</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Get customer</td>
+<td><code>GetItem PK=CUST#&lt;id&gt;, SK=PROFILE</code></td>
+</tr>
+<tr>
+<td>Customer's orders, newest first</td>
+<td><code>Query PK=CUST#&lt;id&gt;, SK begins_with ORDER#</code> (desc)</td>
+</tr>
+<tr>
+<td>Order by id</td>
+<td><code>Query GSI1 GSI1PK=ORDER#&lt;id&gt;</code></td>
+</tr>
+<tr>
+<td>Orders by status for a day</td>
+<td><code>Query GSI2 GSI2PK=STATUS#&lt;s&gt;, GSI2SK begins_with &lt;date&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p>Keep this table in the repo. In DynamoDB, it <em>is</em> the schema.</p>
+<h3 id="in-practice">In practice</h3>
+<p>The script starts by writing the access patterns down, and only then creates the table. Both GSIs fall straight out of the list, and each order item fills in the attributes those indexes need:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span> <span class="o">=</span> <span class="n">recreate_table</span><span class="p">(</span><span class="s2">&quot;p02-access-patterns&quot;</span><span class="p">,</span> <span class="n">gsis</span><span class="o">=</span><span class="p">[</span><span class="n">gsi</span><span class="p">(</span><span class="s2">&quot;GSI1&quot;</span><span class="p">),</span> <span class="n">gsi</span><span class="p">(</span><span class="s2">&quot;GSI2&quot;</span><span class="p">)])</span>
+
+<span class="k">def</span> <span class="nf">order</span><span class="p">(</span><span class="n">cust</span><span class="p">,</span> <span class="n">order_id</span><span class="p">,</span> <span class="n">date</span><span class="p">,</span> <span class="n">status</span><span class="p">,</span> <span class="n">total</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span>
+        <span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;CUST#</span><span class="si">{</span><span class="n">cust</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">date</span><span class="si">}</span><span class="s2">#</span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;GSI1PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>  <span class="c1"># lookup by order id</span>
+        <span class="s2">&quot;GSI1SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;GSI2PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;STATUS#</span><span class="si">{</span><span class="n">status</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>  <span class="c1"># orders by status + date</span>
+        <span class="s2">&quot;GSI2SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">date</span><span class="si">}</span><span class="s2">#</span><span class="si">{</span><span class="n">order_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;Order&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;orderId&quot;</span><span class="p">:</span> <span class="n">order_id</span><span class="p">,</span>
+        <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="n">status</span><span class="p">,</span>
+        <span class="s2">&quot;total&quot;</span><span class="p">:</span> <span class="n">total</span><span class="p">,</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Then it checks that every access pattern really is a single key-based request:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; GetItem p02-access-patterns
+    key:        {PK: &#39;CUST#c1&#39;, SK: &#39;PROFILE&#39;}
+
+=== AP1 customer ===
+{
+  &quot;SK&quot;: &quot;PROFILE&quot;,
+  &quot;name&quot;: &quot;Carol&quot;,
+  &quot;PK&quot;: &quot;CUST#c1&quot;,
+  &quot;type&quot;: &quot;Customer&quot;
+}
+
+&gt;&gt;&gt; Query p02-access-patterns
+    key:        (PK = &#39;CUST#c1&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+    ScanIndexForward: False
+
+=== AP2 customer orders ===
+[
+  &quot;o2&quot;,
+  &quot;o1&quot;
+]
+
+&gt;&gt;&gt; Query p02-access-patterns
+    key:        GSI1PK = &#39;ORDER#o3&#39;
+    IndexName:  GSI1
+
+=== AP3 order by id ===
+&quot;o3&quot;
+
+&gt;&gt;&gt; Query p02-access-patterns
+    key:        (GSI2PK = &#39;STATUS#PENDING&#39; AND begins_with(GSI2SK, &#39;2026-10-20&#39;))
+    IndexName:  GSI2
+
+=== AP4 pending orders today ===
+[
+  &quot;o2&quot;,
+  &quot;o3&quot;
+]
+</code></pre></div>
+<p>Four access patterns, four requests, and not a <code>Scan</code> in sight. Note that AP4 returns orders from two different customers (<code>o2</code> belongs to <code>c1</code>, <code>o3</code> to <code>c2</code>), which the base table alone could never do in one request.</p>
+<h3 id="why">Why</h3>
+<p>Every request stays a key lookup, so latency is flat at any scale. The exercise also shows early on which GSIs we need, and just as usefully, which ones we don't.</p>
+<h3 id="trade-offs">Trade-offs</h3>
+<p>New access patterns that turn up later may need a new GSI or a backfill. It also takes more design work up front than "just add a table".</p>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li>Include the <strong>write</strong> patterns too (e.g. "update order status"). They decide which attributes get duplicated (see <a href="#11--denormalization-and-duplication">denormalization</a>).</li>
+<li>Low-cardinality GSI keys like <code>STATUS#PENDING</code> can get hot. If the volume is high, shard them (<a href="../07-performance-and-scale/#35--write-sharding">write sharding</a>).</li>
+</ul>
+<p>Related: <a href="#04--single-table-design">single-table design</a>, <a href="#09--gsi-overloading">GSI overloading</a>.</p>
+<hr />
+<h2 id="03--key-prefixes-and-key-overloading">03 · Key prefixes and key overloading</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/03-key-prefixes/03-key-prefixes.py">03-key-prefixes.py</a> · run with <code>just run 03</code></p>
+<h3 id="problem_1">Problem</h3>
+<p>In a single table, many entity types share the same <code>PK</code>/<code>SK</code> attributes. A user with id <code>42</code> and an org with id <code>42</code> would collide. Raw ids also make it hard to tell what an item actually is.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We prefix every key value with its entity type and a delimiter:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USER#42</code></td>
+<td><code>USER#42</code></td>
+<td>User</td>
+</tr>
+<tr>
+<td><code>ORG#42</code></td>
+<td><code>ORG#42</code></td>
+<td>Org</td>
+</tr>
+<tr>
+<td><code>ORG#42</code></td>
+<td><code>MEMBER#USER#42</code></td>
+<td>Membership</td>
+</tr>
+<tr>
+<td><code>ORG#42</code></td>
+<td><code>PROJECT#p1</code></td>
+<td>Project</td>
+</tr>
+</tbody>
+</table>
+<p><em>Key overloading</em> means the same attribute (here <code>SK</code>) holds different kinds of values on different items. Prefixes keep that safe, and <code>begins_with(SK, "MEMBER#")</code> picks out one kind.</p>
+<h3 id="in-practice_1">In practice</h3>
+<p>The script writes the four items above and keeps key building in small helpers rather than scattering f-strings around:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">user_key</span><span class="p">(</span><span class="n">user_id</span><span class="p">):</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;USER#</span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;USER#</span><span class="si">{</span><span class="n">user_id</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+
+<span class="k">def</span> <span class="nf">org_pk</span><span class="p">(</span><span class="n">org_id</span><span class="p">):</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;ORG#</span><span class="si">{</span><span class="n">org_id</span><span class="si">}</span><span class="s2">&quot;</span>
+
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="n">org_pk</span><span class="p">(</span><span class="s2">&quot;42&quot;</span><span class="p">))</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;MEMBER#&quot;</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; GetItem p03-key-prefixes
+    key:        {PK: &#39;USER#42&#39;, SK: &#39;USER#42&#39;}
+
+=== User 42 ===
+{
+  &quot;SK&quot;: &quot;USER#42&quot;,
+  &quot;name&quot;: &quot;Dana&quot;,
+  &quot;PK&quot;: &quot;USER#42&quot;,
+  &quot;type&quot;: &quot;User&quot;,
+  &quot;userId&quot;: &quot;42&quot;
+}
+
+&gt;&gt;&gt; Query p03-key-prefixes
+    key:        PK = &#39;ORG#42&#39;
+
+=== Org 42 item collection ===
+[
+  [&quot;MEMBER#USER#42&quot;, &quot;Membership&quot;],
+  [&quot;ORG#42&quot;, &quot;Org&quot;],
+  [&quot;PROJECT#p1&quot;, &quot;Project&quot;]
+]
+
+&gt;&gt;&gt; Query p03-key-prefixes
+    key:        (PK = &#39;ORG#42&#39; AND begins_with(SK, &#39;MEMBER#&#39;))
+
+=== Org 42 members only ===
+[
+  &quot;MEMBER#USER#42&quot;
+]
+
+=== Parsed key ===
+{
+  &quot;entity&quot;: &quot;ORG&quot;,
+  &quot;id&quot;: &quot;42&quot;
+}
+</code></pre></div>
+<p>User <code>42</code> and org <code>42</code> live happily side by side. The org's item collection holds three kinds of item under one partition key, and the <code>MEMBER#</code> prefix narrows it to memberships only. The last block shows that we <em>can</em> parse a key back into its parts, but as the gotchas below say, we'd rather not need to.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li>There are no id collisions between entity types.</li>
+<li>Keys are readable in the console and in logs.</li>
+<li>Prefixes give us cheap per-type filtering inside an item collection.</li>
+</ul>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<p>Keys get a little longer, and key bytes count towards item size and index storage. Every caller must also build keys exactly the same way, so put the key builders in one module.</p>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li>Keep a <code>type</code> attribute and the raw id (<code>userId</code>) on the item. Don't rely on parsing keys.</li>
+<li>Use a delimiter that can't appear in ids. <code>#</code> is the convention.</li>
+<li>Keep prefixes short but clear. They are written millions of times.</li>
+</ul>
+<p>Related: <a href="#04--single-table-design">single-table design</a>, <a href="#05--composite-hierarchical-sort-keys">composite sort keys</a>, <a href="#09--gsi-overloading">GSI overloading</a>.</p>
+<hr />
+<h2 id="04--single-table-design">04 · Single-table design</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/04-single-table-design/04-single-table-design.py">04-single-table-design.py</a> · run with <code>just run 04</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>In a relational database we'd have <code>users</code>, <code>orders</code> and <code>addresses</code> tables and JOIN them. DynamoDB has no joins. With one table per entity, showing a single page takes several round trips.</p>
+<h3 id="pattern_2">Pattern</h3>
+<p>We put every entity type in <strong>one table</strong> with generic key names (<code>PK</code>, <code>SK</code>). Items that are read together share a partition key, and together they form an <strong>item collection</strong>, which one <code>Query</code> fetches in full.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>type</th>
+<th>attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>PROFILE</code></td>
+<td>User</td>
+<td>name, email</td>
+</tr>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>ADDRESS#home</code></td>
+<td>Address</td>
+<td>city</td>
+</tr>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>ORDER#2026-10-01#o1</code></td>
+<td>Order</td>
+<td>total</td>
+</tr>
+<tr>
+<td><code>USER#alice</code></td>
+<td><code>ORDER#2026-10-15#o2</code></td>
+<td>Order</td>
+<td>total</td>
+</tr>
+<tr>
+<td><code>USER#bob</code></td>
+<td><code>PROFILE</code></td>
+<td>User</td>
+<td>name, email</td>
+</tr>
+</tbody>
+</table>
+<p>This layout serves three access patterns:</p>
+<ul>
+<li><strong>Get profile:</strong> <code>GetItem(PK=USER#alice, SK=PROFILE)</code></li>
+<li><strong>Everything for a user:</strong> <code>Query(PK=USER#alice)</code></li>
+<li><strong>User's orders, newest first:</strong> <code>Query(PK=USER#alice, SK begins_with ORDER#, ScanIndexForward=False)</code></li>
+</ul>
+<pre class="mermaid">
+flowchart LR
+    Q[&quot;Query PK = USER#alice&quot;] --&gt; C
+    subgraph C[&quot;Item collection USER#alice&quot;]
+        A[&quot;ADDRESS#home&quot;]
+        O1[&quot;ORDER#2026-10-01#o1&quot;]
+        O2[&quot;ORDER#2026-10-15#o2&quot;]
+        P[&quot;PROFILE&quot;]
+    end
+</pre>
+
+<h3 id="in-practice_2">In practice</h3>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># Access pattern 2: everything about a user in one request</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#alice&quot;</span><span class="p">))</span>
+
+<span class="c1"># Access pattern 3: only a user&#39;s orders, newest first</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#alice&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;ORDER#&quot;</span><span class="p">),</span>
+    <span class="n">ScanIndexForward</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; GetItem p04-single-table
+    key:        {PK: &#39;USER#alice&#39;, SK: &#39;PROFILE&#39;}
+
+=== Alice&#39;s profile ===
+{
+  &quot;SK&quot;: &quot;PROFILE&quot;,
+  &quot;name&quot;: &quot;Alice&quot;,
+  &quot;PK&quot;: &quot;USER#alice&quot;,
+  &quot;type&quot;: &quot;User&quot;,
+  &quot;email&quot;: &quot;alice@example.com&quot;
+}
+
+&gt;&gt;&gt; Query p04-single-table
+    key:        PK = &#39;USER#alice&#39;
+
+=== Alice&#39;s whole item collection (1 query) ===
+[
+  {
+    &quot;SK&quot;: &quot;ADDRESS#home&quot;,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;Address&quot;,
+    &quot;city&quot;: &quot;London&quot;
+  },
+  {
+    &quot;SK&quot;: &quot;ORDER#2026-10-01#o1&quot;,
+    &quot;total&quot;: 42,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;Order&quot;
+  },
+  ...
+  {
+    &quot;SK&quot;: &quot;PROFILE&quot;,
+    &quot;name&quot;: &quot;Alice&quot;,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;User&quot;,
+    &quot;email&quot;: &quot;alice@example.com&quot;
+  }
+]
+
+&gt;&gt;&gt; Query p04-single-table
+    key:        (PK = &#39;USER#alice&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+    ScanIndexForward: False
+
+=== Alice&#39;s orders, newest first ===
+[
+  {
+    &quot;SK&quot;: &quot;ORDER#2026-10-15#o2&quot;,
+    &quot;total&quot;: 17,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;Order&quot;
+  },
+  {
+    &quot;SK&quot;: &quot;ORDER#2026-10-01#o1&quot;,
+    &quot;total&quot;: 42,
+    &quot;PK&quot;: &quot;USER#alice&quot;,
+    &quot;type&quot;: &quot;Order&quot;
+  }
+]
+
+&gt;&gt;&gt; Query p04-single-table
+    key:        PK = &#39;USER#alice&#39;
+
+=== Grouped by entity type ===
+{
+  &quot;Address&quot;: 1,
+  &quot;Order&quot;: 2,
+  &quot;User&quot;: 1
+}
+</code></pre></div>
+<p>One <code>Query</code> returns Alice's profile, address and orders together: the join has effectively happened at write time. The items come back sorted by <code>SK</code>, which is why <code>ADDRESS#</code> comes before <code>ORDER#</code> and <code>PROFILE</code>. In the last step the app groups the rows back into typed objects using the <code>type</code> attribute.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li><strong>Fewer requests.</strong> Related data is pre-joined at write time.</li>
+<li><strong>One table to operate.</strong> Capacity, alarms, backups, streams and IAM all live in one place.</li>
+<li><strong>It scales.</strong> Every access pattern is a key lookup, so latency stays flat at any size.</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li>We must know our access patterns up front (see <a href="#02--access-pattern-first-design">access-pattern-first design</a>). Ad-hoc queries are hard.</li>
+<li>Items are harder to read in the console. A <code>type</code> attribute and readable prefixes help.</li>
+<li>Schema changes often need a backfill: re-writing items with new keys or GSI attributes.</li>
+<li>Multiple tables are still fine when entities are never read together, or when they have very different operational needs (e.g. TTL, streams, throughput). Single-table design is a tool, not a religion.</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>Store the entity's real ID as a normal attribute too (<code>userId</code>), not only inside <code>PK</code>. Parsing keys is brittle.</li>
+<li>An item collection has no size limit on a table with no LSIs. With an LSI, it is capped at 10 GB.</li>
+</ul>
+<h3 id="further-reading">Further reading</h3>
+<ul>
+<li>Alex DeBrie, <em>The DynamoDB Book</em></li>
+<li>AWS re:Invent, "Advanced design patterns for DynamoDB" (Rick Houlihan)</li>
+</ul>
+<hr />
+<h2 id="05--composite-hierarchical-sort-keys">05 · Composite (hierarchical) sort keys</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/05-composite-sort-keys/05-composite-sort-keys.py">05-composite-sort-keys.py</a> · run with <code>just run 05</code></p>
+<h3 id="problem_3">Problem</h3>
+<p>Say we need to filter stores at several levels: all stores, stores in a country, in a state, or in a city. A key condition can only use the partition key and <strong>one</strong> sort key, and only with <code>=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>between</code> or <code>begins_with</code>.</p>
+<h3 id="pattern_3">Pattern</h3>
+<p>We join the levels into a single sort key, ordered <strong>most general → most specific</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BRAND#acme</code></td>
+<td><code>STORE#US#CA#San Francisco#s1</code></td>
+</tr>
+<tr>
+<td><code>BRAND#acme</code></td>
+<td><code>STORE#US#CA#Los Angeles#s2</code></td>
+</tr>
+<tr>
+<td><code>BRAND#acme</code></td>
+<td><code>STORE#US#NY#New York#s3</code></td>
+</tr>
+<tr>
+<td><code>BRAND#acme</code></td>
+<td><code>STORE#UK#ENG#London#s4</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each level is now just a longer prefix:</p>
+<ul>
+<li><strong>Country:</strong> <code>begins_with(SK, "STORE#US#")</code></li>
+<li><strong>State:</strong> <code>begins_with(SK, "STORE#US#CA#")</code></li>
+<li><strong>City:</strong> <code>begins_with(SK, "STORE#UK#ENG#London#")</code></li>
+</ul>
+<p>The same idea gives us range queries when the last part is sortable, e.g. <code>READING#2026-10-05</code> <code>between</code> <code>READING#2026-10-31</code>.</p>
+<h3 id="in-practice_3">In practice</h3>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">stores_under</span><span class="p">(</span><span class="n">prefix</span><span class="p">):</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+        <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;BRAND#acme&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;STORE#</span><span class="si">{</span><span class="n">prefix</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">i</span><span class="p">[</span><span class="s1">&#39;city&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">i</span><span class="p">[</span><span class="s1">&#39;storeId&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">)&quot;</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;Items&quot;</span><span class="p">]]</span>
+
+<span class="n">show</span><span class="p">(</span><span class="s2">&quot;Country = US&quot;</span><span class="p">,</span> <span class="n">stores_under</span><span class="p">(</span><span class="s2">&quot;US#&quot;</span><span class="p">))</span>
+<span class="n">show</span><span class="p">(</span><span class="s2">&quot;State = US/CA&quot;</span><span class="p">,</span> <span class="n">stores_under</span><span class="p">(</span><span class="s2">&quot;US#CA#&quot;</span><span class="p">))</span>
+<span class="n">show</span><span class="p">(</span><span class="s2">&quot;City = London&quot;</span><span class="p">,</span> <span class="n">stores_under</span><span class="p">(</span><span class="s2">&quot;UK#ENG#London#&quot;</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p05-composite-sk
+    key:        (PK = &#39;BRAND#acme&#39; AND begins_with(SK, &#39;STORE#&#39;))
+
+=== All stores ===
+[
+  &quot;London (s4)&quot;,
+  &quot;Manchester (s5)&quot;,
+  &quot;Los Angeles (s2)&quot;,
+  &quot;San Francisco (s1)&quot;,
+  &quot;New York (s3)&quot;
+]
+
+&gt;&gt;&gt; Query p05-composite-sk
+    key:        (PK = &#39;BRAND#acme&#39; AND begins_with(SK, &#39;STORE#US#&#39;))
+
+=== Country = US ===
+[
+  &quot;Los Angeles (s2)&quot;,
+  &quot;San Francisco (s1)&quot;,
+  &quot;New York (s3)&quot;
+]
+
+&gt;&gt;&gt; Query p05-composite-sk
+    key:        (PK = &#39;BRAND#acme&#39; AND begins_with(SK, &#39;STORE#US#CA#&#39;))
+
+=== State = US/CA ===
+[
+  &quot;Los Angeles (s2)&quot;,
+  &quot;San Francisco (s1)&quot;
+]
+
+&gt;&gt;&gt; Query p05-composite-sk
+    key:        (PK = &#39;BRAND#acme&#39; AND begins_with(SK, &#39;STORE#UK#ENG#London#&#39;))
+
+=== City = London ===
+[
+  &quot;London (s4)&quot;
+]
+
+&gt;&gt;&gt; BatchWriteItem
+    p05-composite-sk: 4 puts, 0 deletes
+
+&gt;&gt;&gt; Query p05-composite-sk
+    key:        (PK = &#39;DEVICE#d1&#39; AND SK BETWEEN &#39;READING#2026-10-05&#39; AND &#39;READING#2026-10-31&#39;)
+
+=== Readings 5-31 Oct ===
+[
+  &quot;READING#2026-10-10&quot;,
+  &quot;READING#2026-10-20&quot;
+]
+</code></pre></div>
+<p>The same partition answers four different questions just by lengthening the prefix. Notice the results come back grouped by the hierarchy (UK before US, CA before NY) without any sorting in our code. The last query uses <code>between</code> on the date part of the key: of the four readings written (1, 10 and 20 October, and 2 November), only the two inside the range come back.</p>
+<h3 id="why_3">Why</h3>
+<p>One key answers several query shapes with no extra index, and the results come back sorted by the hierarchy for free.</p>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li>We can only filter on a <strong>prefix</strong>. "All stores in any city named London" isn't possible without another index.</li>
+<li>Changing the order of the levels means rewriting every item.</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li>End each prefix with the delimiter (<code>US#</code>, not <code>US</code>). Otherwise <code>US</code> also matches <code>USA</code>.</li>
+<li>Pick a delimiter that never appears in the values, or escape it.</li>
+<li>Sort keys compare as strings (UTF-8 bytes). Zero-pad numbers (<code>0007</code>) and use ISO-8601 dates (see <a href="#06--sortable-ids-latest-first">sortable IDs</a>).</li>
+</ul>
+<p>Related: <a href="#03--key-prefixes-and-key-overloading">key prefixes</a>, <a href="#04--single-table-design">single-table design</a>.</p>
+<hr />
+<h2 id="06--sortable-ids-latest-first">06 · Sortable IDs, latest first</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/06-sortable-ids-latest-first/06-sortable-ids-latest-first.py">06-sortable-ids-latest-first.py</a> · run with <code>just run 06</code></p>
+<h3 id="problem_4">Problem</h3>
+<p>Feeds, chat messages, audit logs and orders are almost always read newest first, or by time range. Sort keys are compared as strings, in byte order. Random IDs (UUIDv4) and unpadded numbers don't sort by time.</p>
+<h3 id="pattern_4">Pattern</h3>
+<p>We make the sort key <strong>sort lexicographically by time</strong>. There are a few ways to do it:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>SK example</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ISO-8601 + suffix</td>
+<td><code>MSG#2026-10-04T00:00:00.000+00:00#e15102</code></td>
+<td>Human-readable. Suffix keeps keys unique.</td>
+</tr>
+<tr>
+<td>ULID</td>
+<td><code>MSG#01M423BP00MRKZ02TD5VJE5ZWK</code></td>
+<td>26 chars, unique, time-ordered.</td>
+</tr>
+<tr>
+<td>KSUID / UUIDv7</td>
+<td><code>MSG#018f3c...</code></td>
+<td>Same idea, other formats.</td>
+</tr>
+</tbody>
+</table>
+<p>Then both of the common reads become a single <code>Query</code>:</p>
+<ul>
+<li><strong>Latest N:</strong> <code>Query(PK=ROOM#x, ScanIndexForward=False, Limit=N)</code></li>
+<li><strong>Time range:</strong> <code>Key("SK").between("MSG#2026-10-02", "MSG#2026-10-05~")</code></li>
+</ul>
+<h3 id="in-practice_4">In practice</h3>
+<p>The script writes five messages into two rooms, <strong>deliberately out of order</strong>: one room uses ISO-8601 keys with a random suffix, the other uses ULIDs. It uses a minimal ULID helper (a 48-bit millisecond timestamp plus 80 random bits, in Crockford base32):</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">for</span> <span class="n">day</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">3</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">5</span><span class="p">]:</span>  <span class="c1"># written out of order on purpose</span>
+    <span class="n">ts</span> <span class="o">=</span> <span class="n">base</span> <span class="o">+</span> <span class="n">day</span> <span class="o">*</span> <span class="mi">86_400_000</span>
+    <span class="n">iso</span> <span class="o">=</span> <span class="n">datetime</span><span class="o">.</span><span class="n">fromtimestamp</span><span class="p">(</span><span class="n">ts</span> <span class="o">/</span> <span class="mi">1000</span><span class="p">,</span> <span class="n">timezone</span><span class="o">.</span><span class="n">utc</span><span class="p">)</span><span class="o">.</span><span class="n">isoformat</span><span class="p">(</span><span class="n">timespec</span><span class="o">=</span><span class="s2">&quot;milliseconds&quot;</span><span class="p">)</span>
+    <span class="c1"># Option A: ISO-8601 timestamp + random suffix to keep keys unique</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;ROOM#general&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;MSG#</span><span class="si">{</span><span class="n">iso</span><span class="si">}</span><span class="s2">#</span><span class="si">{</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()</span><span class="o">.</span><span class="n">hex</span><span class="p">[:</span><span class="mi">6</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Oct </span><span class="si">{</span><span class="mi">1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">day</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+    <span class="c1"># Option B: ULID - one sortable, unique, compact ID</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;ROOM#random&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;MSG#</span><span class="si">{</span><span class="n">ulid</span><span class="p">(</span><span class="n">ts</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;text&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Oct </span><span class="si">{</span><span class="mi">1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">day</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">})</span>
+
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;ROOM#general&quot;</span><span class="p">),</span> <span class="n">ScanIndexForward</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">Limit</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p06-sortable-ids
+    key:        PK = &#39;ROOM#general&#39;
+    Limit:      3
+    ScanIndexForward: False
+
+=== Latest 3 (ISO-8601 keys, newest first) ===
+[
+  [&quot;MSG#2026-10-08T00:00:00.000+00:00#8c124f&quot;, &quot;Oct 8&quot;],
+  [&quot;MSG#2026-10-06T00:00:00.000+00:00#e76ff8&quot;, &quot;Oct 6&quot;],
+  [&quot;MSG#2026-10-04T00:00:00.000+00:00#013331&quot;, &quot;Oct 4&quot;]
+]
+
+&gt;&gt;&gt; Query p06-sortable-ids
+    key:        PK = &#39;ROOM#random&#39;
+    Limit:      3
+    ScanIndexForward: False
+
+=== Latest 3 (ULID keys, newest first) ===
+[
+  [&quot;MSG#01M4CCYJ00YF4V29TPQ2Q815FN&quot;, &quot;Oct 8&quot;],
+  [&quot;MSG#01M4785400M01SJY52C44QG3AS&quot;, &quot;Oct 6&quot;],
+  [&quot;MSG#01M423BP00B2ZX7BX56Z4SG3M8&quot;, &quot;Oct 4&quot;]
+]
+
+&gt;&gt;&gt; Query p06-sortable-ids
+    key:        (PK = &#39;ROOM#general&#39; AND SK BETWEEN &#39;MSG#2026-10-02&#39; AND &#39;MSG#2026-10-05~&#39;)
+
+=== Messages between 2 and 5 Oct ===
+[
+  &quot;Oct 2&quot;,
+  &quot;Oct 3&quot;,
+  &quot;Oct 4&quot;
+]
+
+=== uuid4 values are not time-ordered ===
+[
+  &quot;070a7415&quot;,
+  &quot;4df62a9c&quot;,
+  &quot;8b980121&quot;
+]
+</code></pre></div>
+<p>Even though the messages were written out of order, both rooms return the latest three newest first, straight from DynamoDB. The ULIDs share a time-based prefix (<code>01M4...</code>), which is why they sort correctly despite looking random. The range query uses <code>~</code> as the upper bound so that any key starting <code>MSG#2026-10-05</code> is included. The final block is the counter-example: sorted UUIDv4 values are just random strings, with no relationship to when they were created.</p>
+<h3 id="why_4">Why</h3>
+<p>Newest-first and time-range queries become a single cheap <code>Query</code>, and nothing is sorted in code. ULIDs give us the ID and the timestamp in one value, and no two collide.</p>
+<h3 id="trade-offs_4">Trade-offs</h3>
+<ul>
+<li>A time-ordered <strong>sort key</strong> is fine. A time-ordered <strong>partition key</strong> (e.g. <code>PK=DATE#2026-10-20</code>) is a hot partition. Shard or bucket it instead (see <a href="../07-performance-and-scale/#35--write-sharding">write sharding</a> and <a href="../07-performance-and-scale/#37--time-series-tables">time-series tables</a>).</li>
+<li>ULIDs aren't human-readable, so store a readable <code>createdAt</code> as well.</li>
+</ul>
+<h3 id="gotchas_4">Gotchas</h3>
+<ul>
+<li>Always use <strong>UTC</strong> and a fixed format. Mixing <code>+00:00</code> and <code>Z</code>, or different precisions, breaks the ordering.</li>
+<li>Zero-pad numbers (<code>ORDER#0042</code>, not <code>ORDER#42</code>), or <code>10</code> sorts before <code>9</code>.</li>
+<li>Use <code>~</code> (which sorts after alphanumerics) as an inclusive upper bound for a prefix range.</li>
+<li>In real code, use the <code>python-ulid</code> package rather than the small helper in the script.</li>
+</ul>
+<hr />
+<h2 id="07--inverted-index">07 · Inverted index</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/07-inverted-index/07-inverted-index.py">07-inverted-index.py</a> · run with <code>just run 07</code></p>
+<h3 id="problem_5">Problem</h3>
+<p>Our base table answers "what's on invoice X?" (<code>PK=INV#X</code>). We also need "which invoices contain product Y?" and "which invoices belong to customer Z?". Those values live in the <strong>sort key</strong>, and we can't query by sort key alone.</p>
+<h3 id="pattern_5">Pattern</h3>
+<p>We create a GSI whose partition key is the table's <code>SK</code> and whose sort key is the table's <code>PK</code>. That's the whole trick.</p>
+<table>
+<thead>
+<tr>
+<th>PK (base)</th>
+<th>SK (base)</th>
+<th>Inverted PK</th>
+<th>Inverted SK</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>INV#1001</code></td>
+<td><code>PRODUCT#apple</code></td>
+<td><code>PRODUCT#apple</code></td>
+<td><code>INV#1001</code></td>
+</tr>
+<tr>
+<td><code>INV#1002</code></td>
+<td><code>PRODUCT#apple</code></td>
+<td><code>PRODUCT#apple</code></td>
+<td><code>INV#1002</code></td>
+</tr>
+<tr>
+<td><code>INV#1001</code></td>
+<td><code>CUSTOMER#c1</code></td>
+<td><code>CUSTOMER#c1</code></td>
+<td><code>INV#1001</code></td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Lines on an invoice:</strong> <code>Query PK=INV#1001</code></li>
+<li><strong>Invoices with apple:</strong> <code>Query Inverted SK=PRODUCT#apple</code></li>
+<li><strong>Invoices for c1:</strong> <code>Query Inverted SK=CUSTOMER#c1</code></li>
+</ul>
+<h3 id="in-practice_5">In practice</h3>
+<p>Defining the index is a one-liner: the same two attributes, swapped.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span> <span class="o">=</span> <span class="n">recreate_table</span><span class="p">(</span><span class="s2">&quot;p07-inverted-index&quot;</span><span class="p">,</span> <span class="n">gsis</span><span class="o">=</span><span class="p">[</span><span class="n">gsi</span><span class="p">(</span><span class="s2">&quot;Inverted&quot;</span><span class="p">,</span> <span class="n">pk</span><span class="o">=</span><span class="s2">&quot;SK&quot;</span><span class="p">,</span> <span class="n">sk</span><span class="o">=</span><span class="s2">&quot;PK&quot;</span><span class="p">)])</span>
+
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">IndexName</span><span class="o">=</span><span class="s2">&quot;Inverted&quot;</span><span class="p">,</span> <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;PRODUCT#apple&quot;</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p07-inverted-index
+    key:        PK = &#39;INV#1001&#39;
+
+=== Base table: everything on INV#1001 ===
+[
+  [&quot;CUSTOMER#c1&quot;, null],
+  [&quot;PRODUCT#apple&quot;, 3],
+  [&quot;PRODUCT#pear&quot;, 1]
+]
+
+&gt;&gt;&gt; Query p07-inverted-index
+    key:        SK = &#39;PRODUCT#apple&#39;
+    IndexName:  Inverted
+
+=== Inverted: invoices containing apple ===
+[
+  [&quot;INV#1001&quot;, 3],
+  [&quot;INV#1002&quot;, 5]
+]
+
+&gt;&gt;&gt; Query p07-inverted-index
+    key:        SK = &#39;CUSTOMER#c1&#39;
+    IndexName:  Inverted
+
+=== Inverted: invoices for customer c1 ===
+[
+  &quot;INV#1001&quot;,
+  &quot;INV#1002&quot;
+]
+</code></pre></div>
+<p>The base-table query lists everything on invoice 1001: its customer link (which has no quantity, hence <code>null</code>) and two product lines. On the inverted index, the very same items are queried from the other side, by product and by customer. We never added a new attribute.</p>
+<h3 id="why_5">Why</h3>
+<p>One extra index answers the reverse of <strong>every</strong> relationship in the table, and it needs no new attributes because it reuses <code>PK</code> and <code>SK</code>.</p>
+<h3 id="trade-offs_5">Trade-offs</h3>
+<ul>
+<li>Every item is written to the index (it isn't sparse), so it roughly doubles write cost.</li>
+<li>Items whose <code>SK</code> is a constant like <code>PROFILE</code> or <code>METADATA</code> all land in one huge inverted partition. Make sure no access pattern queries those, or use a separate <a href="#09--gsi-overloading">overloaded GSI</a> instead.</li>
+</ul>
+<h3 id="gotchas_5">Gotchas</h3>
+<ul>
+<li>GSIs are eventually consistent (see <a href="../05-consistency/#28--gsis-are-eventually-consistent">GSIs are eventually consistent</a>).</li>
+<li>Popular values (one product on millions of invoices) become hot keys.</li>
+</ul>
+<p>Related: <a href="#08--adjacency-list-many-to-many">adjacency list</a>.</p>
+<hr />
+<h2 id="08--adjacency-list-many-to-many">08 · Adjacency list (many-to-many)</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/08-adjacency-list/08-adjacency-list.py">08-adjacency-list.py</a> · run with <code>just run 08</code></p>
+<h3 id="problem_6">Problem</h3>
+<p>Students take many courses and courses have many students. SQL handles this with a join table. DynamoDB has no joins, and we need to query in <strong>both</strong> directions.</p>
+<h3 id="pattern_6">Pattern</h3>
+<p>We store each node as an item, and each <strong>edge</strong> as its own item. An edge item uses one node as its <code>PK</code> and the other as its <code>SK</code>. Then we add an <a href="#07--inverted-index">inverted GSI</a> (<code>PK</code> = <code>SK</code>, <code>SK</code> = <code>PK</code>) to walk the edges backwards.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>type</th>
+<th>attrs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>STUDENT#ann</code></td>
+<td><code>STUDENT#ann</code></td>
+<td>Student</td>
+<td>name</td>
+</tr>
+<tr>
+<td><code>COURSE#db101</code></td>
+<td><code>COURSE#db101</code></td>
+<td>Course</td>
+<td>title</td>
+</tr>
+<tr>
+<td><code>STUDENT#ann</code></td>
+<td><code>COURSE#db101</code></td>
+<td>Enrolment</td>
+<td>grade</td>
+</tr>
+<tr>
+<td><code>STUDENT#ben</code></td>
+<td><code>COURSE#db101</code></td>
+<td>Enrolment</td>
+<td>grade</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Ann's courses:</strong> <code>Query PK=STUDENT#ann, SK begins_with COURSE#</code></li>
+<li><strong>Students in db101:</strong> <code>Query Inverted SK=COURSE#db101, PK begins_with STUDENT#</code></li>
+</ul>
+<pre class="mermaid">
+flowchart LR
+    ann[&quot;STUDENT#ann&quot;] -- &quot;Enrolment (A)&quot; --&gt; db101[&quot;COURSE#db101&quot;]
+    ann -- &quot;Enrolment (A)&quot; --&gt; ml200[&quot;COURSE#ml200&quot;]
+    ben[&quot;STUDENT#ben&quot;] -- &quot;Enrolment (B)&quot; --&gt; db101
+    cat[&quot;STUDENT#cat&quot;] -- &quot;Enrolment (B)&quot; --&gt; ml200
+</pre>
+
+<h3 id="in-practice_6">In practice</h3>
+<p>Each node gets a "self" item where <code>PK == SK</code>, and each enrolment is an edge item that carries its own <code>grade</code>:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span>
+    <span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;STUDENT#</span><span class="si">{</span><span class="n">s</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;COURSE#</span><span class="si">{</span><span class="n">c</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;Enrolment&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;grade&quot;</span><span class="p">:</span> <span class="s2">&quot;A&quot;</span> <span class="k">if</span> <span class="n">s</span> <span class="o">==</span> <span class="s2">&quot;ann&quot;</span> <span class="k">else</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span>  <span class="c1"># edges can carry their own attributes</span>
+<span class="p">})</span>
+
+<span class="c1"># Backward: who is enrolled in db101? (inverted index: SK becomes the partition key)</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">IndexName</span><span class="o">=</span><span class="s2">&quot;Inverted&quot;</span><span class="p">,</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;COURSE#db101&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;STUDENT#&quot;</span><span class="p">),</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p08-adjacency
+    key:        (PK = &#39;STUDENT#ann&#39; AND begins_with(SK, &#39;COURSE#&#39;))
+
+=== Ann&#39;s courses ===
+[
+  [&quot;COURSE#db101&quot;, &quot;A&quot;],
+  [&quot;COURSE#ml200&quot;, &quot;A&quot;]
+]
+
+&gt;&gt;&gt; Query p08-adjacency
+    key:        (SK = &#39;COURSE#db101&#39; AND begins_with(PK, &#39;STUDENT#&#39;))
+    IndexName:  Inverted
+
+=== Students in db101 ===
+[
+  &quot;STUDENT#ann&quot;,
+  &quot;STUDENT#ben&quot;
+]
+
+&gt;&gt;&gt; Query p08-adjacency
+    key:        SK = &#39;COURSE#ml200&#39;
+    IndexName:  Inverted
+
+=== Everything pointing at ml200 ===
+[
+  [&quot;COURSE#ml200&quot;, &quot;Course&quot;],
+  [&quot;STUDENT#ann&quot;, &quot;Enrolment&quot;],
+  [&quot;STUDENT#cat&quot;, &quot;Enrolment&quot;]
+]
+</code></pre></div>
+<p>The forward query walks from a student to their courses, along with the grade stored on each edge. The inverted query walks from a course back to its students. The last query shows a nice side effect: because the course's own node item has <code>PK == SK</code>, it also shows up in the inverted index, so a single query returns the course <em>and</em> everything pointing at it.</p>
+<h3 id="why_6">Why</h3>
+<ul>
+<li>Both directions take one <code>Query</code>.</li>
+<li>Edges can carry attributes (grade, role, joined date).</li>
+<li>It works for graphs too: followers, friends, bills of materials.</li>
+</ul>
+<h3 id="trade-offs_6">Trade-offs</h3>
+<ul>
+<li>An edge query returns ids, not full node details. Either duplicate the fields we display onto the edge (<a href="#11--denormalization-and-duplication">denormalization</a>), or do a <code>BatchGetItem</code> for the nodes.</li>
+<li>Deleting a node means deleting all its edges too.</li>
+</ul>
+<h3 id="gotchas_6">Gotchas</h3>
+<ul>
+<li>A very popular node (a celebrity with millions of followers) makes a hot partition on the inverted index. Shard it (<a href="../07-performance-and-scale/#35--write-sharding">write sharding</a>).</li>
+<li>Multi-hop graph traversal is still N round trips. For heavy graph work, use a graph database.</li>
+</ul>
+<p>Related: <a href="#07--inverted-index">inverted index</a>, <a href="#09--gsi-overloading">GSI overloading</a>.</p>
+<hr />
+<h2 id="09--gsi-overloading">09 · GSI overloading</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/09-gsi-overloading/09-gsi-overloading.py">09-gsi-overloading.py</a> · run with <code>just run 09</code></p>
+<h3 id="problem_7">Problem</h3>
+<p>Each new access pattern seems to need its own GSI. But a table can have at most 20 GSIs, and every GSI adds write cost and storage.</p>
+<h3 id="pattern_7">Pattern</h3>
+<p>We give the GSI <strong>generic</strong> key names (<code>GSI1PK</code>, <code>GSI1SK</code>), and each entity type fills them with whatever <em>it</em> needs. One index then serves several access patterns:</p>
+<table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>PK</th>
+<th>GSI1PK</th>
+<th>GSI1SK</th>
+<th>Serves</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Employee</td>
+<td><code>EMP#e1</code></td>
+<td><code>EMAIL#eve@acme.com</code></td>
+<td><code>EMP#e1</code></td>
+<td>Employee by email</td>
+</tr>
+<tr>
+<td>Ticket</td>
+<td><code>TICKET#t1</code></td>
+<td><code>ASSIGNEE#e1</code></td>
+<td><code>P1#2026-10-18</code></td>
+<td>Tickets per assignee, by priority</td>
+</tr>
+<tr>
+<td>Office</td>
+<td><code>OFFICE#o1</code></td>
+<td><code>CITY#London</code></td>
+<td><code>OFFICE#o1</code></td>
+<td>Offices in a city</td>
+</tr>
+</tbody>
+</table>
+<p><a href="#03--key-prefixes-and-key-overloading">Key prefixes</a> keep the values from colliding.</p>
+<h3 id="in-practice_7">In practice</h3>
+<p>The same two index attributes mean something different on each entity type:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># Employee: look up by email</span>
+<span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;EMP#e1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;EMP#e1&quot;</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;Employee&quot;</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">:</span> <span class="s2">&quot;Eve&quot;</span><span class="p">,</span>
+ <span class="s2">&quot;GSI1PK&quot;</span><span class="p">:</span> <span class="s2">&quot;EMAIL#eve@acme.com&quot;</span><span class="p">,</span> <span class="s2">&quot;GSI1SK&quot;</span><span class="p">:</span> <span class="s2">&quot;EMP#e1&quot;</span><span class="p">}</span>
+<span class="c1"># Ticket: per assignee, sorted by priority then date</span>
+<span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;TICKET#</span><span class="si">{</span><span class="n">tid</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;TICKET#</span><span class="si">{</span><span class="n">tid</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;Ticket&quot;</span><span class="p">,</span>
+ <span class="s2">&quot;GSI1PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ASSIGNEE#</span><span class="si">{</span><span class="n">emp</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;GSI1SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">prio</span><span class="si">}</span><span class="s2">#</span><span class="si">{</span><span class="n">date</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+<span class="c1"># Office: by city</span>
+<span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;OFFICE#</span><span class="si">{</span><span class="n">oid</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;OFFICE#</span><span class="si">{</span><span class="n">oid</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;Office&quot;</span><span class="p">,</span>
+ <span class="s2">&quot;GSI1PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;CITY#</span><span class="si">{</span><span class="n">city</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;GSI1SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;OFFICE#</span><span class="si">{</span><span class="n">oid</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p09-gsi-overloading
+    key:        GSI1PK = &#39;EMAIL#eve@acme.com&#39;
+    IndexName:  GSI1
+
+=== Employee by email ===
+&quot;Eve&quot;
+
+&gt;&gt;&gt; Query p09-gsi-overloading
+    key:        (GSI1PK = &#39;ASSIGNEE#e1&#39; AND begins_with(GSI1SK, &#39;P1#&#39;))
+    IndexName:  GSI1
+
+=== Eve&#39;s P1 tickets ===
+[
+  &quot;TICKET#t1&quot;,
+  &quot;TICKET#t3&quot;
+]
+
+&gt;&gt;&gt; Query p09-gsi-overloading
+    key:        GSI1PK = &#39;CITY#London&#39;
+    IndexName:  GSI1
+
+=== London offices ===
+[
+  &quot;OFFICE#o1&quot;,
+  &quot;OFFICE#o2&quot;
+]
+
+=== Indexes on table ===
+[
+  &quot;GSI1&quot;
+]
+</code></pre></div>
+<p>Three unrelated access patterns (employee by email, an assignee's tickets by priority, and offices by city) all go through <code>GSI1</code>. The final line confirms that the table has exactly one index.</p>
+<h3 id="why_7">Why</h3>
+<ul>
+<li>Fewer indexes means lower write cost and less to operate.</li>
+<li>New access patterns can often reuse an existing GSI, as long as the new entity type doesn't already use it.</li>
+</ul>
+<h3 id="trade-offs_7">Trade-offs</h3>
+<ul>
+<li>Index attributes no longer explain themselves. Document what <code>GSI1PK</code> means for each type (this is where the <a href="#02--access-pattern-first-design">access-pattern table</a> earns its keep).</li>
+<li>All entity types share the index's projection (see <a href="../03-querying/#15--gsi-projections">GSI projections</a>).</li>
+</ul>
+<h3 id="gotchas_7">Gotchas</h3>
+<ul>
+<li>An item without <code>GSI1PK</code> simply isn't in the index. That is the <a href="#10--sparse-index">sparse index</a> trick.</li>
+<li>When an entity changes (e.g. a ticket is reassigned), remember to update its GSI attributes too.</li>
+</ul>
+<p>Related: <a href="#04--single-table-design">single-table design</a>, <a href="#07--inverted-index">inverted index</a>.</p>
+<hr />
+<h2 id="10--sparse-index">10 · Sparse index</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/10-sparse-index/10-sparse-index.py">10-sparse-index.py</a> · run with <code>just run 10</code></p>
+<h3 id="problem_8">Problem</h3>
+<p>We want "all open orders" or "all VIP users". These are a small subset of a large table. A <code>Scan</code> with a filter reads, and bills, every item (see <a href="../03-querying/#13--filter-expressions-dont-reduce-cost">filter expressions don't reduce cost</a>).</p>
+<h3 id="pattern_8">Pattern</h3>
+<p>A GSI only contains items that <strong>have its key attributes</strong>. So we set those attributes only on the items we want in the subset:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>status</th>
+<th>openOrdersPK</th>
+<th>openSince</th>
+<th>In index?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ORDER#0000</code></td>
+<td>OPEN</td>
+<td><code>OPEN</code></td>
+<td><code>2026-10-01</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>ORDER#0001</code></td>
+<td>CLOSED</td>
+<td>–</td>
+<td>–</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>ORDER#0200</code></td>
+<td>OPEN</td>
+<td><code>OPEN</code></td>
+<td><code>2026-10-03</code></td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Read the subset:</strong> <code>Query OpenOrders openOrdersPK=OPEN</code></li>
+<li><strong>Leave the subset:</strong> <code>UpdateItem ... REMOVE openOrdersPK, openSince</code></li>
+</ul>
+<h3 id="in-practice_8">In practice</h3>
+<p>The script writes 1,000 orders and gives the index attributes only to every 200th one:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1000</span><span class="p">):</span>
+    <span class="n">item</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">n</span><span class="si">:</span><span class="s2">04</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;ORDER&quot;</span><span class="p">,</span> <span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;CLOSED&quot;</span><span class="p">}</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">%</span> <span class="mi">200</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">item</span> <span class="o">|=</span> <span class="p">{</span><span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;OPEN&quot;</span><span class="p">,</span> <span class="s2">&quot;openOrdersPK&quot;</span><span class="p">:</span> <span class="s2">&quot;OPEN&quot;</span><span class="p">,</span> <span class="s2">&quot;openSince&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;2026-10-</span><span class="si">{</span><span class="n">n</span><span class="w"> </span><span class="o">//</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">:</span><span class="s2">02</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+    <span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="n">item</span><span class="p">)</span>
+
+<span class="c1"># Closing an order: REMOVE the attributes and it drops out of the index.</span>
+<span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;ORDER#0000&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;ORDER&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET #s = :closed REMOVE openOrdersPK, openSince&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;#s&quot;</span><span class="p">:</span> <span class="s2">&quot;status&quot;</span><span class="p">},</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:closed&quot;</span><span class="p">:</span> <span class="s2">&quot;CLOSED&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; BatchWriteItem
+    p10-sparse-index: 25 puts, 0 deletes
+    ... (+37 more BatchWriteItem calls not shown)
+
+&gt;&gt;&gt; Query p10-sparse-index
+    key:        openOrdersPK = &#39;OPEN&#39;
+    IndexName:  OpenOrders
+
+=== Open orders (read from the index only) ===
+[
+  &quot;ORDER#0000&quot;,
+  &quot;ORDER#0200&quot;,
+  &quot;ORDER#0400&quot;,
+  &quot;ORDER#0600&quot;,
+  &quot;ORDER#0800&quot;
+]
+
+=== Items examined ===
+{
+  &quot;index_query&quot;: 5,
+  &quot;table_size&quot;: 1000
+}
+
+&gt;&gt;&gt; UpdateItem p10-sparse-index
+    key:        {PK: &#39;ORDER#0000&#39;, SK: &#39;ORDER&#39;}
+    update:     SET status = &#39;CLOSED&#39; REMOVE openOrdersPK, openSince
+
+&gt;&gt;&gt; Query p10-sparse-index
+    key:        openOrdersPK = &#39;OPEN&#39;
+    IndexName:  OpenOrders
+
+=== After closing ORDER#0000 ===
+[
+  &quot;ORDER#0200&quot;,
+  &quot;ORDER#0400&quot;,
+  &quot;ORDER#0600&quot;,
+  &quot;ORDER#0800&quot;
+]
+</code></pre></div>
+<p>The <code>Items examined</code> block is the point of the pattern: the query looked at <strong>5</strong> items, not 1,000. A <code>Scan</code> with <code>status = OPEN</code> would have read the whole table to find the same five. Closing <code>ORDER#0000</code> with <code>REMOVE</code> takes it out of the index, and the next query no longer sees it.</p>
+<h3 id="why_8">Why</h3>
+<p>The query reads only the matching items, so its cost tracks the size of the subset, not the table. The index stays small, so storage and write costs are low too: only items in the index cost GSI writes.</p>
+<h3 id="trade-offs_8">Trade-offs</h3>
+<ul>
+<li>The app must add and remove the attributes at the right moments. Bugs here leave stale entries behind.</li>
+<li>A constant partition key (<code>OPEN</code>) puts the whole subset in one partition. That's fine while it's small. Shard it if it gets big or busy (<a href="../07-performance-and-scale/#35--write-sharding">write sharding</a>).</li>
+</ul>
+<h3 id="gotchas_8">Gotchas</h3>
+<ul>
+<li>GSI key attributes must be String, Number or Binary. Booleans can't be keys, so use <code>"Y"</code> or a timestamp.</li>
+<li>Use <code>REMOVE</code> to take an item out of the index. Setting the attribute to an empty string is an error.</li>
+</ul>
+<p>Related: <a href="#09--gsi-overloading">GSI overloading</a>, <a href="../06-lifecycle-and-events/#33--soft-delete--archival">soft delete &amp; archival</a>.</p>
+<hr />
+<h2 id="11--denormalization-and-duplication">11 · Denormalization and duplication</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/02-modelling/11-denormalization/11-denormalization.py">11-denormalization.py</a> · run with <code>just run 11</code></p>
+<h3 id="problem_9">Problem</h3>
+<p>A screen lists a customer's orders alongside the customer's name. Normalised, that's one query for the orders plus a lookup for the customer. Across many screens, those extra reads add up in both latency and cost.</p>
+<h3 id="pattern_9">Pattern</h3>
+<p>We copy data to where it is read. There are two common forms.</p>
+<p><strong>A. Duplicate fields onto child items.</strong> This is good for small fields that rarely change.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>name / customerName</th>
+<th>total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CUST#c1</code></td>
+<td><code>PROFILE</code></td>
+<td>Carol</td>
+<td></td>
+</tr>
+<tr>
+<td><code>CUST#c1</code></td>
+<td><code>ORDER#o1</code></td>
+<td>Carol</td>
+<td>10</td>
+</tr>
+<tr>
+<td><code>CUST#c1</code></td>
+<td><code>ORDER#o2</code></td>
+<td>Carol</td>
+<td>10</td>
+</tr>
+</tbody>
+</table>
+<p><strong>B. Embed a bounded collection</strong> as a map or list on one item, e.g. a customer's few addresses. This works for "one-to-few" relationships.</p>
+<p>When the source changes, we update every copy. We do that in a <a href="../05-consistency/#25--transactions">transaction</a> if the copies must agree, or asynchronously from a <a href="../06-lifecycle-and-events/#31--dynamodb-streams--cdc">stream</a> if a short lag is fine.</p>
+<h3 id="in-practice_9">In practice</h3>
+<p>Each order carries <code>customerName</code>, and the addresses are embedded as a map on one item. When Carol changes her name, the script fans the change out to the profile and every order in a single transaction, so the copies never disagree:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">client</span><span class="o">.</span><span class="n">transact_write_items</span><span class="p">(</span><span class="n">TransactItems</span><span class="o">=</span><span class="p">[</span>
+    <span class="p">{</span><span class="s2">&quot;Update&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;TableName&quot;</span><span class="p">:</span> <span class="n">table</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="s2">&quot;Key&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;CUST#c1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;PROFILE&quot;</span><span class="p">},</span>
+        <span class="s2">&quot;UpdateExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;SET #n = :n&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;ExpressionAttributeNames&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;#n&quot;</span><span class="p">:</span> <span class="s2">&quot;name&quot;</span><span class="p">},</span>
+        <span class="s2">&quot;ExpressionAttributeValues&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;:n&quot;</span><span class="p">:</span> <span class="n">new_name</span><span class="p">},</span>
+    <span class="p">}},</span>
+    <span class="o">*</span><span class="p">[{</span><span class="s2">&quot;Update&quot;</span><span class="p">:</span> <span class="p">{</span>
+        <span class="s2">&quot;TableName&quot;</span><span class="p">:</span> <span class="n">table</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="s2">&quot;Key&quot;</span><span class="p">:</span> <span class="n">k</span><span class="p">,</span>
+        <span class="s2">&quot;UpdateExpression&quot;</span><span class="p">:</span> <span class="s2">&quot;SET customerName = :n&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;ExpressionAttributeValues&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;:n&quot;</span><span class="p">:</span> <span class="n">new_name</span><span class="p">},</span>
+    <span class="p">}}</span> <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">order_keys</span><span class="p">],</span>
+<span class="p">])</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Query p11-denormalization
+    key:        (PK = &#39;CUST#c1&#39; AND begins_with(SK, &#39;ORDER#&#39;))
+
+=== Orders with customer name (1 query, no join) ===
+[
+  [&quot;ORDER#o1&quot;, &quot;Carol&quot;],
+  [&quot;ORDER#o2&quot;, &quot;Carol&quot;],
+  [&quot;ORDER#o3&quot;, &quot;Carol&quot;]
+]
+
+&gt;&gt;&gt; PutItem p11-denormalization
+    item:       {PK: &#39;CUST#c1&#39;, SK: &#39;ADDRESSES&#39;, addresses: {home: {city: &#39;London&#39;}, work: {city: &#39;Leeds&#39;}}}
+
+&gt;&gt;&gt; GetItem p11-denormalization
+    key:        {PK: &#39;CUST#c1&#39;, SK: &#39;ADDRESSES&#39;}
+
+=== Embedded addresses ===
+{
+  &quot;work&quot;: {
+    &quot;city&quot;: &quot;Leeds&quot;
+  },
+  &quot;home&quot;: {
+    &quot;city&quot;: &quot;London&quot;
+  }
+}
+
+&gt;&gt;&gt; TransactWriteItems
+    - Update p11-denormalization
+        key:        {PK: &#39;CUST#c1&#39;, SK: &#39;PROFILE&#39;}
+        update:     SET name = &#39;Carol Smith&#39;
+    - Update p11-denormalization
+        key:        {PK: &#39;CUST#c1&#39;, SK: &#39;ORDER#o1&#39;}
+        update:     SET customerName = &#39;Carol Smith&#39;
+    - Update p11-denormalization
+        key:        {PK: &#39;CUST#c1&#39;, SK: &#39;ORDER#o2&#39;}
+        update:     SET customerName = &#39;Carol Smith&#39;
+    - Update p11-denormalization
+        key:        {PK: &#39;CUST#c1&#39;, SK: &#39;ORDER#o3&#39;}
+        update:     SET customerName = &#39;Carol Smith&#39;
+
+&gt;&gt;&gt; Query p11-denormalization
+    key:        PK = &#39;CUST#c1&#39;
+
+=== After rename, all copies updated ===
+[
+  [&quot;ADDRESSES&quot;, null],
+  [&quot;ORDER#o1&quot;, &quot;Carol Smith&quot;],
+  [&quot;ORDER#o2&quot;, &quot;Carol Smith&quot;],
+  [&quot;ORDER#o3&quot;, &quot;Carol Smith&quot;],
+  [&quot;PROFILE&quot;, &quot;Carol Smith&quot;]
+]
+</code></pre></div>
+<p>Listing orders with the customer's name is one query and no join. The <code>TransactWriteItems</code> block shows the price we pay for that: one rename becomes four updates, applied all-or-nothing. (The <code>ADDRESSES</code> item shows <code>null</code> because it carries neither a <code>name</code> nor a <code>customerName</code>.)</p>
+<h3 id="why_9">Why</h3>
+<p>Reads take one request and stay cheap, and most apps read far more than they write. It also fits DynamoDB's model: we pre-compute the join at write time.</p>
+<h3 id="trade-offs_9">Trade-offs</h3>
+<p>There's more work on writes, and a risk that copies drift apart. Bigger items also mean more read and write units.</p>
+<h3 id="rules-of-thumb">Rules of thumb</h3>
+<ul>
+<li>Duplicate <strong>immutable</strong> or <strong>rarely-changing</strong> data freely: names, created dates, product titles at order time.</li>
+<li>Don't duplicate fast-changing data (stock levels, counters). Reference it instead.</li>
+<li>Embed only when the collection is <strong>bounded</strong> and small. Unbounded lists hit the 400 KB item limit (see <a href="../04-item-size/#17--keep-items-small-use-item-collections">keep items small</a>).</li>
+</ul>
+<h3 id="gotchas_9">Gotchas</h3>
+<ul>
+<li>Sometimes the copy is the right answer for history. The price <em>at order time</em> shouldn't change when the catalogue changes.</li>
+<li>A transaction can touch at most 100 items. Large fan-outs need streams or batches.</li>
+</ul>
+<p>Related: <a href="#04--single-table-design">single-table design</a>, <a href="../04-item-size/#18--vertical-partitioning">vertical partitioning</a>.</p>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/01-intro-and-setup/">01 - Intro &amp; setup</a> | <a href="/posts/08-dynamodb-patterns/03-querying/">03 - Querying</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 - Performance &amp; scale</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>07 - Performance &amp; scale</h1>
+<p><small>2026-10-20</small></p>
+<p>DynamoDB scales by spreading data across partitions, and each partition has a throughput ceiling of about <strong>3,000 reads and 1,000 writes per second</strong>. That one fact explains almost every performance problem we'll meet: it nearly always comes down to <strong>too much traffic on too few partition key values</strong>.</p>
+<p><strong>High-cardinality partition keys</strong> (user ID, order ID) spread traffic naturally, while low-cardinality ones (status, date, country) create hot partitions. When one logical key really is hot, <strong>write sharding</strong> splits it into <code>KEY#0..N</code>, either with random suffixes plus a scatter-gather read, or with calculated suffixes so we can still do a direct get. <strong>Caching</strong> (DAX or a read-through cache) absorbs repeated reads of the same hot items, at the cost of staleness. And <strong>time-series data</strong>, which is written to "now" and mostly read recently, wants keys bucketed by time, with old data expired by TTL or by rotating a table per period.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pattern</th>
+<th>What we'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>34</td>
+<td><a href="#34--high-cardinality-partition-keys">High-cardinality partition keys</a></td>
+<td>Measuring key distribution; moving low-cardinality lookups to a GSI</td>
+</tr>
+<tr>
+<td>35</td>
+<td><a href="#35--write-sharding">Write sharding</a></td>
+<td>Random vs calculated shard suffixes, parallel reads</td>
+</tr>
+<tr>
+<td>36</td>
+<td><a href="#36--caching-dax--elasticache">Caching (DAX / ElastiCache)</a></td>
+<td>Read-through and write-through caching, hit rates, staleness</td>
+</tr>
+<tr>
+<td>37</td>
+<td><a href="#37--time-series-tables">Time-series tables</a></td>
+<td>Table-per-period rotation vs time-bucketed keys with TTL</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="34--high-cardinality-partition-keys">34 · High-cardinality partition keys</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/07-performance-and-scale/34-high-cardinality-keys/34-high-cardinality-keys.py">34-high-cardinality-keys.py</a> · run with <code>just run 34</code></p>
+<h3 id="problem">Problem</h3>
+<p>DynamoDB hashes the partition key to choose a physical partition. If the key has only a few distinct values (<code>status</code>, <code>country</code>, <code>date</code>, or <code>tenant</code> when one tenant is huge), traffic piles onto a few partitions. Those partitions get throttled while the rest of the table sits idle, and we're paying for capacity we can't use.</p>
+<h3 id="pattern">Pattern</h3>
+<p>We choose a partition key with <strong>many distinct values that are used about evenly</strong>. User ID, order ID, device ID and session ID are all good examples.</p>
+<table>
+<thead>
+<tr>
+<th>Choice</th>
+<th>Distinct values</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status</code></td>
+<td>3</td>
+<td>❌ hot partitions</td>
+</tr>
+<tr>
+<td><code>date</code></td>
+<td>1 per day</td>
+<td>❌ today's partition gets all writes</td>
+</tr>
+<tr>
+<td><code>customerId</code></td>
+<td>100k+</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><code>orderId</code></td>
+<td>millions</td>
+<td>✅</td>
+</tr>
+</tbody>
+</table>
+<p>If we still need to query by a low-cardinality attribute, we put it in a GSI. But GSIs have the same per-partition limits, so we either shard the GSI key too (<a href="#35--write-sharding">35</a>) or make it sparse (<a href="../02-modelling/#10--sparse-index">10 · Sparse index</a>).</p>
+<h3 id="in-practice">In practice</h3>
+<p>The script generates 1,000 orders across 300 customers and three statuses. It counts how the items would spread under each key choice, keys the table by customer, and puts status on a GSI with a 4-way shard suffix:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;CUSTOMER#</span><span class="si">{</span><span class="n">o</span><span class="p">[</span><span class="s1">&#39;customer&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">o</span><span class="p">[</span><span class="s1">&#39;order_id&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="n">o</span><span class="p">[</span><span class="s2">&quot;status&quot;</span><span class="p">],</span>
+<span class="c1"># the GSI has the same cardinality problem, so add a shard suffix</span>
+<span class="s2">&quot;GSI1PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;STATUS#</span><span class="si">{</span><span class="n">o</span><span class="p">[</span><span class="s1">&#39;status&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">#</span><span class="si">{</span><span class="nb">int</span><span class="p">(</span><span class="n">o</span><span class="p">[</span><span class="s1">&#39;order_id&#39;</span><span class="p">][</span><span class="mi">1</span><span class="p">:])</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">4</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<span class="s2">&quot;GSI1SK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;ORDER#</span><span class="si">{</span><span class="n">o</span><span class="p">[</span><span class="s1">&#39;order_id&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>=== BAD: PK=status -&gt; distinct partition keys ===
+{
+  &quot;distinct&quot;: 3,
+  &quot;items_per_key&quot;: {
+    &quot;SHIPPED&quot;: 336,
+    &quot;PENDING&quot;: 333,
+    &quot;DELIVERED&quot;: 331
+  }
+}
+
+&gt;&gt;&gt; BatchWriteItem
+    p34-high-cardinality: 25 puts, 0 deletes
+    ... (+37 more BatchWriteItem calls not shown)
+
+=== GOOD: PK=customer -&gt; distinct partition keys ===
+{
+  &quot;distinct&quot;: 290,
+  &quot;max_items_on_one_key&quot;: 9
+}
+
+&gt;&gt;&gt; Query p34-high-cardinality
+    key:        PK = &#39;CUSTOMER#c234&#39;
+
+=== Orders for CUSTOMER#c234 ===
+[
+  &quot;ORDER#o0000&quot;,
+  &quot;ORDER#o0416&quot;,
+  &quot;ORDER#o0674&quot;,
+  &quot;ORDER#o0704&quot;
+]
+
+&gt;&gt;&gt; Query p34-high-cardinality
+    key:        GSI1PK = &#39;STATUS#PENDING#0&#39;
+    IndexName:  GSI1
+
+&gt;&gt;&gt; Query p34-high-cardinality
+    key:        GSI1PK = &#39;STATUS#PENDING#1&#39;
+    IndexName:  GSI1
+
+&gt;&gt;&gt; Query p34-high-cardinality
+    key:        GSI1PK = &#39;STATUS#PENDING#2&#39;
+    IndexName:  GSI1
+    ... (+1 more Query calls not shown)
+
+=== PENDING orders via sharded GSI ===
+333
+</code></pre></div>
+<p>With <code>status</code> as the key, a thousand items land on just 3 keys, around 330 each. With <code>customer</code> as the key, the same data spreads over 290 keys with at most 9 items on any one. The "pending orders" question still works: we query all 4 shards of the GSI and merge, getting back all 333.</p>
+<h3 id="why">Why</h3>
+<ul>
+<li>Throughput is spread evenly across partitions, so the table's capacity is actually usable.</li>
+<li>We avoid throttling that only shows up under load, which is the worst time to find out.</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<ul>
+<li>A high-cardinality key often means a query "by status" needs a GSI, or a different design.</li>
+<li>Item collections (data stored together under one key) get smaller, so we pick the key that is both spread out <strong>and</strong> matches how we read the data (<a href="../02-modelling/#02--access-pattern-first-design">02 · Access-pattern-first design</a>).</li>
+</ul>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li>What counts is <strong>uneven traffic</strong>, not just the number of distinct values. A million users where one celebrity gets 90% of the traffic is still a hot key.</li>
+<li>Use <strong>CloudWatch Contributor Insights</strong> to find hot keys in production.</li>
+<li>Throttling on a GSI <strong>also throttles writes to the base table</strong>.</li>
+</ul>
+<hr />
+<h2 id="35--write-sharding">35 · Write sharding</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/07-performance-and-scale/35-write-sharding/35-write-sharding.py">35-write-sharding.py</a> · run with <code>just run 35</code></p>
+<h3 id="problem_1">Problem</h3>
+<p>Sometimes every write naturally goes to one partition key, such as "today's events" (<code>EVENTS#2026-10-20</code>). A single partition handles about <strong>1,000 WCU and 3,000 RCU per second</strong>. Above that we get throttled, however much capacity the table has overall. Adaptive capacity helps, but it can't split the traffic for a single key.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We add a suffix to the hot key so writes spread over N partitions. On read, we query all N and merge the results. This is <strong>scatter-gather</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>EVENTS#2026-10-20#0</code></td>
+<td><code>EVT#00017</code></td>
+</tr>
+<tr>
+<td><code>EVENTS#2026-10-20#1</code></td>
+<td><code>EVT#00003</code></td>
+</tr>
+<tr>
+<td>…</td>
+<td>…</td>
+</tr>
+<tr>
+<td><code>EVENTS#2026-10-20#9</code></td>
+<td><code>EVT#00199</code></td>
+</tr>
+</tbody>
+</table>
+<pre class="mermaid">
+flowchart LR
+    W[Writers] --&gt;|suffix 0..9| S0[EVENTS#day#0]
+    W --&gt; S1[EVENTS#day#1]
+    W --&gt; S9[EVENTS#day#9]
+    S0 --&gt; R[Reader: query all N in parallel, merge]
+    S1 --&gt; R
+    S9 --&gt; R
+</pre>
+
+<p>There are two ways to pick the suffix:</p>
+<ul>
+<li><strong>Random suffix</strong> (<code>random % N</code>). Writes spread best, but to read one item we must query every shard.</li>
+<li><strong>Calculated suffix</strong> (<code>hash(order_id) % N</code>). Writes still spread well, and if we know the ID we can work out the shard and do a direct <code>GetItem</code>.</li>
+</ul>
+<h3 id="in-practice_1">In practice</h3>
+<p>The script writes 200 events with a random suffix over 10 shards and reads them back in parallel. Then it writes three orders with a calculated suffix and fetches one directly.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">query_shard</span><span class="p">(</span><span class="n">shard</span><span class="p">):</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;EVENTS#</span><span class="si">{</span><span class="n">DAY</span><span class="si">}</span><span class="s2">#</span><span class="si">{</span><span class="n">shard</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">resp</span><span class="p">[</span><span class="s2">&quot;Items&quot;</span><span class="p">]</span>
+
+<span class="c1"># Scatter-gather: query all shards in parallel, merge the results.</span>
+<span class="k">with</span> <span class="n">ThreadPoolExecutor</span><span class="p">(</span><span class="n">max_workers</span><span class="o">=</span><span class="n">SHARDS</span><span class="p">)</span> <span class="k">as</span> <span class="n">pool</span><span class="p">:</span>
+    <span class="n">results</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">pool</span><span class="o">.</span><span class="n">map</span><span class="p">(</span><span class="n">query_shard</span><span class="p">,</span> <span class="nb">range</span><span class="p">(</span><span class="n">SHARDS</span><span class="p">)))</span>
+
+<span class="k">def</span> <span class="nf">shard_for</span><span class="p">(</span><span class="n">order_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+    <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">order_id</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">(),</span> <span class="mi">16</span><span class="p">)</span> <span class="o">%</span> <span class="n">SHARDS</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; BatchWriteItem
+    p35-write-sharding: 25 puts, 0 deletes
+    ... (+5 more BatchWriteItem calls not shown)
+
+&gt;&gt;&gt; Query p35-write-sharding
+    key:        PK = &#39;EVENTS#2026-10-20#0&#39;
+
+&gt;&gt;&gt; Query p35-write-sharding
+    key:        PK = &#39;EVENTS#2026-10-20#1&#39;
+
+&gt;&gt;&gt; Query p35-write-sharding
+    key:        PK = &#39;EVENTS#2026-10-20#2&#39;
+    ... (+7 more Query calls not shown)
+
+=== Random suffix: items per shard ===
+{
+  &quot;shard 0&quot;: 26,
+  &quot;shard 1&quot;: 14,
+  &quot;shard 2&quot;: 21,
+  &quot;shard 3&quot;: 22,
+  &quot;shard 4&quot;: 21,
+  &quot;shard 5&quot;: 20,
+  &quot;shard 6&quot;: 15,
+  &quot;shard 7&quot;: 22,
+  &quot;shard 8&quot;: 22,
+  &quot;shard 9&quot;: 17
+}
+
+=== Total gathered ===
+200
+
+&gt;&gt;&gt; PutItem p35-write-sharding
+    item:       {PK: &#39;ORDERS#2026-10-20#3&#39;, SK: &#39;ORDER#o-1001&#39;, total: 10}
+
+&gt;&gt;&gt; PutItem p35-write-sharding
+    item:       {PK: &#39;ORDERS#2026-10-20#7&#39;, SK: &#39;ORDER#o-1002&#39;, total: 10}
+
+&gt;&gt;&gt; PutItem p35-write-sharding
+    item:       {PK: &#39;ORDERS#2026-10-20#5&#39;, SK: &#39;ORDER#o-1003&#39;, total: 10}
+
+&gt;&gt;&gt; GetItem p35-write-sharding
+    key:        {PK: &#39;ORDERS#2026-10-20#7&#39;, SK: &#39;ORDER#o-1002&#39;}
+
+=== Calculated suffix: direct GetItem for o-1002 (shard 7) ===
+{
+  &quot;SK&quot;: &quot;ORDER#o-1002&quot;,
+  &quot;total&quot;: 10,
+  &quot;PK&quot;: &quot;ORDERS#2026-10-20#7&quot;
+}
+</code></pre></div>
+<p>The random suffix spreads 200 writes roughly evenly (14 to 26 per shard), and reading "all of today" takes 10 queries to gather them back. With the calculated suffix, <code>o-1002</code> always hashes to shard 7, so a single <code>GetItem</code> finds it without touching the other shards.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li>Write throughput grows <strong>roughly N times</strong> for that logical key.</li>
+<li>It's the standard fix for time-bucketed keys, global leaderboards, vote counters and similar hot keys.</li>
+</ul>
+<h3 id="trade-offs_1">Trade-offs</h3>
+<ul>
+<li>Reads that need "all of today" cost N queries, so run them in parallel.</li>
+<li>Sorting across shards happens in the client, as a merge.</li>
+<li>Changing N later means old and new data use different shard counts. Store N alongside the data, or version it.</li>
+</ul>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li><strong>Don't shard by default.</strong> First fix the key so it has high cardinality (<a href="#34--high-cardinality-partition-keys">34</a>), and shard only the keys that are truly hot.</li>
+<li>Hot <strong>reads</strong> are often better solved with a cache (<a href="#36--caching-dax--elasticache">36</a>) than with sharding.</li>
+<li>For counters, shard the counter items and sum them on read (see <a href="../05-consistency/#24--atomic-counters">24 · Atomic counters</a>).</li>
+</ul>
+<hr />
+<h2 id="36--caching-dax--elasticache">36 · Caching (DAX / ElastiCache)</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/07-performance-and-scale/36-caching/36-caching.py">36-caching.py</a> · run with <code>just run 36</code></p>
+<h3 id="problem_2">Problem</h3>
+<p>Some keys are read far more than others: a product page, a config item, a celebrity profile. One partition serves at most about 3,000 RCU/s, and paying for the same read over and over is wasteful anyway.</p>
+<h3 id="pattern_2">Pattern</h3>
+<p>We put a cache in front of DynamoDB. There are two common choices:</p>
+<ul>
+<li><strong>DAX (DynamoDB Accelerator):</strong> a managed, API-compatible cache. We swap the client and keep the same calls, and get microsecond reads. It has an <strong>item cache</strong> (for <code>GetItem</code>/<code>BatchGetItem</code>) and a <strong>query cache</strong> (for <code>Query</code>/<code>Scan</code>).</li>
+<li><strong>ElastiCache / Redis:</strong> more control, for example caching computed views built from several items, but we manage invalidation ourselves.</li>
+</ul>
+<p>Whichever we use, the strategies are the same:</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Read</th>
+<th>Write</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Read-through</td>
+<td>cache miss → read DynamoDB → fill cache</td>
+<td>write to DynamoDB only</td>
+</tr>
+<tr>
+<td>Write-through</td>
+<td>from cache</td>
+<td>write DynamoDB, then update cache</td>
+</tr>
+<tr>
+<td>TTL</td>
+<td>entries expire after N seconds</td>
+<td>n/a, bounds how stale data can get</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice_2">In practice</h3>
+<p>DynamoDB Local has no DAX, so the script <strong>simulates</strong> it with a tiny in-process read-through cache: a dict keyed by primary key, with a TTL. With real DAX the code barely changes:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="kn">from</span> <span class="nn">amazondax</span> <span class="kn">import</span> <span class="n">AmazonDaxClient</span>
+<span class="n">dax</span> <span class="o">=</span> <span class="n">AmazonDaxClient</span><span class="o">.</span><span class="n">resource</span><span class="p">(</span><span class="n">endpoint_url</span><span class="o">=</span><span class="s2">&quot;daxs://my-cluster.xxxx.dax-clusters.us-east-1.amazonaws.com&quot;</span><span class="p">)</span>
+<span class="n">table</span> <span class="o">=</span> <span class="n">dax</span><span class="o">.</span><span class="n">Table</span><span class="p">(</span><span class="s2">&quot;my-table&quot;</span><span class="p">)</span>          <span class="c1"># same API as boto3</span>
+<span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;PRODUCT#p1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">})</span>
+</code></pre></div>
+<p>The stand-in cache, trimmed:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">):</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="p">(</span><span class="n">key</span><span class="p">[</span><span class="s2">&quot;PK&quot;</span><span class="p">],</span> <span class="n">key</span><span class="p">[</span><span class="s2">&quot;SK&quot;</span><span class="p">])</span>
+    <span class="n">hit</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">hit</span> <span class="ow">and</span> <span class="n">hit</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">():</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">hits</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="n">hit</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">misses</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="n">item</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="n">key</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;Item&quot;</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="p">[</span><span class="n">k</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">ttl</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">item</span>
+
+<span class="k">def</span> <span class="nf">put</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">item</span><span class="p">):</span>
+    <span class="c1"># Write-through: update DynamoDB, then the cache</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="n">item</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">store</span><span class="p">[(</span><span class="n">item</span><span class="p">[</span><span class="s2">&quot;PK&quot;</span><span class="p">],</span> <span class="n">item</span><span class="p">[</span><span class="s2">&quot;SK&quot;</span><span class="p">])]</span> <span class="o">=</span> <span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="n">time</span><span class="o">.</span><span class="n">monotonic</span><span class="p">()</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">ttl</span><span class="p">)</span>
+</code></pre></div>
+<p>The script reads a hot key 100 times, updates it from "another process" that bypasses the cache, waits for the TTL (0.5 s), and finally writes through the cache:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p36-caching
+    item:       {PK: &#39;PRODUCT#p1&#39;, SK: &#39;META&#39;, name: &#39;Widget&#39;, price: 10}
+
+&gt;&gt;&gt; GetItem p36-caching
+    key:        {PK: &#39;PRODUCT#p1&#39;, SK: &#39;META&#39;}
+
+=== 100 reads of a hot key ===
+{
+  &quot;dynamodb_reads&quot;: 1,
+  &quot;cache_hits&quot;: 99
+}
+
+&gt;&gt;&gt; UpdateItem p36-caching
+    key:        {PK: &#39;PRODUCT#p1&#39;, SK: &#39;META&#39;}
+    update:     SET price = 12
+
+=== Right after an external update (stale) ===
+{
+  &quot;price&quot;: 10
+}
+
+&gt;&gt;&gt; GetItem p36-caching
+    key:        {PK: &#39;PRODUCT#p1&#39;, SK: &#39;META&#39;}
+
+=== After TTL expiry (fresh) ===
+{
+  &quot;price&quot;: 12
+}
+
+&gt;&gt;&gt; PutItem p36-caching
+    item:       {PK: &#39;PRODUCT#p1&#39;, SK: &#39;META&#39;, name: &#39;Widget&#39;, price: 15}
+
+=== After write-through ===
+{
+  &quot;price&quot;: 15
+}
+</code></pre></div>
+<p>A hundred reads cost one <code>GetItem</code>. That's the whole point. But the external update to <code>price = 12</code> isn't seen: the cache keeps serving <code>10</code> until the entry expires, and only then does a fresh <code>GetItem</code> pick up <code>12</code>. The write-through at the end updates both, so the next read sees <code>15</code> straight away without touching DynamoDB.</p>
+<h3 id="why_2">Why</h3>
+<ul>
+<li>Takes read load off hot partitions.</li>
+<li>Much lower latency, and cheaper when the hit rate is high.</li>
+</ul>
+<h3 id="trade-offs_2">Trade-offs</h3>
+<ul>
+<li><strong>Stale reads.</strong> DAX is eventually consistent. Strongly consistent reads skip the cache, and writes from other clients aren't seen until the TTL expires (as the output shows).</li>
+<li>Another piece of infrastructure (a cluster in a VPC) to run and pay for.</li>
+<li>No help for write-heavy keys (see <a href="#35--write-sharding">35</a>).</li>
+</ul>
+<h3 id="gotchas_2">Gotchas</h3>
+<ul>
+<li>In DAX the item cache and the query cache are <strong>separate</strong>. A write updates the item cache but <strong>not</strong> cached query results.</li>
+<li>Short TTLs bound staleness but lower the hit rate, so tune them for each kind of data.</li>
+<li>Before adding a cache, check whether a better key design (<a href="#34--high-cardinality-partition-keys">34</a>) or <a href="../02-modelling/#11--denormalization-and-duplication">denormalisation</a> removes the hot read in the first place.</li>
+</ul>
+<hr />
+<h2 id="37--time-series-tables">37 · Time-series tables</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/07-performance-and-scale/37-time-series-tables/37-time-series-tables.py">37-time-series-tables.py</a> · run with <code>just run 37</code></p>
+<h3 id="problem_3">Problem</h3>
+<p>Time-series data (metrics, events, logs) has three traits that work against a naive design:</p>
+<ul>
+<li><strong>Writes all go to "now"</strong>, so a <code>date</code> partition key gets hot.</li>
+<li><strong>Recent data is read a lot</strong>, while old data is almost never read.</li>
+<li><strong>Old data must be deleted</strong>, and deleting item by item costs a write unit per item.</li>
+</ul>
+<h3 id="pattern_3">Pattern</h3>
+<p>There are two common shapes.</p>
+<p><strong>Option A: one table per period</strong> (day, week or month).</p>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>metrics-2026-10</code></td>
+<td>current: high write capacity</td>
+</tr>
+<tr>
+<td><code>metrics-2026-09</code></td>
+<td>read-only: low capacity</td>
+</tr>
+<tr>
+<td><code>metrics-2026-08</code></td>
+<td>expired: <strong>drop the table</strong> (free, instant)</td>
+</tr>
+</tbody>
+</table>
+<p>We create the next period's table ahead of time, point writers at the current table, and drop whole tables once they pass retention.</p>
+<p><strong>Option B: one table, a time-bucketed partition key, plus TTL</strong> (<a href="../06-lifecycle-and-events/#30--ttl-for-expiry">30 · TTL for expiry</a>).</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>value</th>
+<th>expires_at</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SENSOR#s1#2026-10-20</code></td>
+<td><code>2026-10-20T01:20:00+00:00</code></td>
+<td>80</td>
+<td>1763600400</td>
+</tr>
+</tbody>
+</table>
+<p>The bucket (sensor + day) keeps partitions bounded and spreads writes, and the ISO timestamp in the sort key gives us range queries with <code>between</code>.</p>
+<h3 id="in-practice_3">In practice</h3>
+<p>The script does both. For option A it creates three monthly tables, then drops the oldest with a single <code>DeleteTable</code>. For option B it writes nine readings into a day bucket, each with an <code>expires_at</code> 30 days out, and range-queries one hour.</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># Option A: retention = 2 months, drop the oldest table. One API call.</span>
+<span class="n">client</span><span class="o">.</span><span class="n">delete_table</span><span class="p">(</span><span class="n">TableName</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;p37-metrics-</span><span class="si">{</span><span class="n">oldest</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># Option B: one partition per sensor per day, TTL removes old items</span>
+<span class="n">batch</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span>
+    <span class="n">Item</span><span class="o">=</span><span class="p">{</span>
+        <span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;SENSOR#s1#</span><span class="si">{</span><span class="n">ts</span><span class="si">:</span><span class="s2">%Y-%m-%d</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="n">ts</span><span class="o">.</span><span class="n">isoformat</span><span class="p">(),</span>
+        <span class="s2">&quot;value&quot;</span><span class="p">:</span> <span class="n">hour</span> <span class="o">*</span> <span class="mi">60</span> <span class="o">+</span> <span class="n">minute</span><span class="p">,</span>
+        <span class="s2">&quot;expires_at&quot;</span><span class="p">:</span> <span class="nb">int</span><span class="p">(</span><span class="n">ts</span><span class="o">.</span><span class="n">timestamp</span><span class="p">())</span> <span class="o">+</span> <span class="n">retention</span><span class="p">,</span>
+    <span class="p">}</span>
+<span class="p">)</span>
+
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;SENSOR#s1#2026-10-20&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">between</span><span class="p">(</span><span class="s2">&quot;2026-10-20T01:00&quot;</span><span class="p">,</span> <span class="s2">&quot;2026-10-20T02:00&quot;</span><span class="p">)</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; BatchWriteItem
+    p37-metrics-2026-10: 5 puts, 0 deletes
+
+&gt;&gt;&gt; BatchWriteItem
+    p37-metrics-2026-09: 5 puts, 0 deletes
+
+&gt;&gt;&gt; BatchWriteItem
+    p37-metrics-2026-08: 5 puts, 0 deletes
+
+=== Tables before rotation ===
+[
+  &quot;p37-metrics-2026-08&quot;,
+  &quot;p37-metrics-2026-09&quot;,
+  &quot;p37-metrics-2026-10&quot;,
+  &quot;p37-metrics-ttl&quot;
+]
+
+=== Tables after dropping the oldest ===
+[
+  &quot;p37-metrics-2026-09&quot;,
+  &quot;p37-metrics-2026-10&quot;,
+  &quot;p37-metrics-ttl&quot;
+]
+
+&gt;&gt;&gt; UpdateTimeToLive p37-metrics-ttl
+
+&gt;&gt;&gt; BatchWriteItem
+    p37-metrics-ttl: 9 puts, 0 deletes
+
+&gt;&gt;&gt; Query p37-metrics-ttl
+    key:        (PK = &#39;SENSOR#s1#2026-10-20&#39; AND SK BETWEEN &#39;2026-10-20T01:00&#39; AND &#39;2026-10-20T02:00&#39;)
+
+=== Bucketed query: 01:00-02:00 ===
+[
+  [
+    &quot;2026-10-20T01:00:00+00:00&quot;,
+    60
+  ],
+  [
+    &quot;2026-10-20T01:20:00+00:00&quot;,
+    80
+  ],
+  [
+    &quot;2026-10-20T01:40:00+00:00&quot;,
+    100
+  ]
+]
+
+&gt;&gt;&gt; DescribeTimeToLive p37-metrics-ttl
+
+=== TTL status ===
+{
+  &quot;TimeToLiveStatus&quot;: &quot;ENABLED&quot;,
+  &quot;AttributeName&quot;: &quot;expires_at&quot;
+}
+</code></pre></div>
+<p>Dropping August's data is one call, with no per-item deletes and no write capacity spent. (On AWS we'd also lower the read-only tables' provisioned capacity, or switch them to on-demand.) In option B, the <code>between</code> on the ISO sort key returns exactly the three readings from 01:00 to 02:00, and TTL is enabled to clear them out after 30 days. Locally, though, TTL won't actually delete them on schedule.</p>
+<h3 id="why_3">Why</h3>
+<ul>
+<li><strong>Option A:</strong> dropping a table costs nothing and uses no write capacity. Each period can be tuned separately (capacity, table class, e.g. Standard-IA for old tables).</li>
+<li><strong>Option B:</strong> simpler to run, with one table and one schema. TTL deletes are free (no WCU).</li>
+</ul>
+<h3 id="trade-offs_3">Trade-offs</h3>
+<ul>
+<li><strong>Option A:</strong> the app must route requests to the right table, a query across periods hits several tables, and we need automation to create and drop tables.</li>
+<li><strong>Option B:</strong> TTL deletes are not instant (see Gotchas). Too fine a bucket means many queries for a long range, and too coarse a bucket gets hot.</li>
+</ul>
+<h3 id="gotchas_3">Gotchas</h3>
+<ul>
+<li>TTL deletes usually happen within a few days of expiry, not at the moment of expiry. Filter out <code>expires_at &lt; now</code> on read if it matters.</li>
+<li>DynamoDB Local accepts the TTL setting, but don't rely on it to delete items on schedule.</li>
+<li>For heavy writes, combine the bucket with a shard suffix (<a href="#35--write-sharding">35</a>).</li>
+<li>For analytics over history, export to S3 instead (<a href="../08-operations/#41--analytics-outside-dynamodb">41 · Analytics outside DynamoDB</a>).</li>
+</ul>
+<hr />
+<p>Next up: <a href="../08-operations/">08 - Operations</a>, covering capacity modes, backups, global tables and analytics.</p>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/06-lifecycle-and-events/">06 - Lifecycle &amp; events</a> | <a href="/posts/08-dynamodb-patterns/08-operations/">08 - Operations</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

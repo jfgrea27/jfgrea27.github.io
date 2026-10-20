@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>01 - Types of TEEs</title>
 <link rel="icon" href="/favicon/favicon.ico">
-<link rel="stylesheet" href="/style.css?v=3">
+<link rel="stylesheet" href="/style.css?v=5">
 
 </head>
 <body>
@@ -53,12 +53,12 @@ During boot, the CPU will generate a hardware-derived key, the <strong>Root Seal
 <blockquote>
 <p><strong><em>NOTE:</em></strong> I had some difficulties installing SGX Linux on my Ubuntu 24.04 box. <a href="https://codentium.com/setting-up-intel-sgx/">This article</a> was very useful</p>
 </blockquote>
-<pre><code class="language-sh">git clone git@github.com:jfgrea27/minimal-sgx-enclave.git
-# build
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>git@github.com:jfgrea27/minimal-sgx-enclave.git
+<span class="c1"># build</span>
 make
-# run
+<span class="c1"># run</span>
 ./app
-</code></pre>
+</code></pre></div>
 <p>You have ran your first enclave!</p>
 <p>The repository explores SGX more in depth including:</p>
 <ul>

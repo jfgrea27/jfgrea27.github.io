@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 - Intro &amp; setup</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>01 - Intro &amp; setup</h1>
+<p><small>2026-10-20</small></p>
+<p>Before any of the patterns make sense, we need a shared vocabulary: what a table, an item and a key are, how DynamoDB stores data on partitions, what each read and write operation costs, and what the request language looks like. This page covers all of that, then walks through the everyday API (lesson 00) and how to develop against DynamoDB without an AWS account (lesson 01).</p>
+<p>Every later page assumes the material here, so it's worth reading even if you've used DynamoDB before.</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Section</th>
+<th>You'll learn</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+<td><a href="#what-dynamodb-is">What DynamoDB is</a></td>
+<td>The one-paragraph pitch, and the price of it</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#the-data-model">The data model</a></td>
+<td>Tables, items, attributes, keys, item collections, types</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#how-data-is-stored-partitions">How data is stored: partitions</a></td>
+<td>Hashing, per-partition limits, why key design matters</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#reading-data">Reading data</a> / <a href="#writing-data">Writing data</a></td>
+<td>The operations and what they cost</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#expressions">Expressions</a></td>
+<td>The small string language every request uses</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#secondary-indexes">Secondary indexes</a></td>
+<td>GSIs vs LSIs</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#capacity-and-cost">Capacity and cost</a></td>
+<td>Read and write units, on-demand vs provisioned</td>
+</tr>
+<tr>
+<td></td>
+<td><a href="#built-in-features">Built-in features</a> / <a href="#limits-worth-memorising">Limits</a></td>
+<td>What comes for free, and the numbers to remember</td>
+</tr>
+<tr>
+<td>00</td>
+<td><a href="#00--basics">Basics</a></td>
+<td>Put, get, update, query, conditional put, delete, scan</td>
+</tr>
+<tr>
+<td>01</td>
+<td><a href="#01--local-development">Local development</a></td>
+<td>Docker setup, endpoint config, per-test tables, Local vs LocalStack vs moto</td>
+</tr>
+</tbody>
+</table>
+<h2 id="what-dynamodb-is">What DynamoDB is</h2>
+<p>Amazon DynamoDB is a fully managed, serverless <strong>key-value and document database</strong>. We create a table and read and write items over an HTTPS API. AWS handles the servers, storage, replication, patching and scaling for us.</p>
+<p>Its promise is <strong>consistent single-digit-millisecond latency at any scale</strong>, from ten requests a day to millions a second. The price of that promise is that we <strong>design the table around the queries we will run</strong>. DynamoDB is very fast at fetching data by key, and it deliberately offers nothing slower.</p>
+<p>It grew out of Amazon's internal <em>Dynamo</em> system (described in the <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf">2007 paper</a>) and launched as an AWS service in 2012.</p>
+<h2 id="the-data-model">The data model</h2>
+<p>A handful of terms come up on every page of this series:</p>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Table</strong></td>
+<td>A collection of items. The only thing we declare up front is the primary key (and any indexes).</td>
+</tr>
+<tr>
+<td><strong>Item</strong></td>
+<td>One record, up to <strong>400 KB</strong>. Think of it as a JSON document.</td>
+</tr>
+<tr>
+<td><strong>Attribute</strong></td>
+<td>A named value on an item. Items in the same table can have completely different attributes.</td>
+</tr>
+<tr>
+<td><strong>Primary key</strong></td>
+<td>Uniquely identifies an item. Either a <em>partition key</em> alone, or <em>partition key + sort key</em>.</td>
+</tr>
+<tr>
+<td><strong>Partition key (PK, "hash key")</strong></td>
+<td>Hashed to decide which physical partition stores the item.</td>
+</tr>
+<tr>
+<td><strong>Sort key (SK, "range key")</strong></td>
+<td>Orders items that share a partition key. Enables range queries.</td>
+</tr>
+<tr>
+<td><strong>Item collection</strong></td>
+<td>All items that share a partition key value. One <code>Query</code> can read all or part of it.</td>
+</tr>
+</tbody>
+</table>
+<p>The item collection is the idea to hold on to. Most of the modelling patterns are about deciding which items should live together in one.</p>
+<h3 id="data-types">Data types</h3>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Code</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>String</td>
+<td><code>S</code></td>
+<td><code>"USER#alice"</code></td>
+</tr>
+<tr>
+<td>Number</td>
+<td><code>N</code></td>
+<td><code>42</code>, <code>3.14</code>. Sent as a string on the wire, up to 38 digits of precision.</td>
+</tr>
+<tr>
+<td>Binary</td>
+<td><code>B</code></td>
+<td>gzip bytes, images</td>
+</tr>
+<tr>
+<td>Boolean</td>
+<td><code>BOOL</code></td>
+<td><code>true</code></td>
+</tr>
+<tr>
+<td>Null</td>
+<td><code>NULL</code></td>
+<td><code>null</code></td>
+</tr>
+<tr>
+<td>Map</td>
+<td><code>M</code></td>
+<td>nested object <code>{"city": "London"}</code></td>
+</tr>
+<tr>
+<td>List</td>
+<td><code>L</code></td>
+<td><code>["a", 1, true]</code></td>
+</tr>
+<tr>
+<td>String / Number / Binary set</td>
+<td><code>SS</code> / <code>NS</code> / <code>BS</code></td>
+<td><code>{"red", "blue"}</code>, unique and unordered</td>
+</tr>
+</tbody>
+</table>
+<p>Key attributes must be <code>S</code>, <code>N</code> or <code>B</code>. In Python, boto3's resource API (<code>boto3.resource("dynamodb")</code>) converts our values to and from these types for us. The one surprise is that numbers come back as <code>Decimal</code>.</p>
+<h2 id="how-data-is-stored-partitions">How data is stored: partitions</h2>
+<div class="highlight"><pre><span></span><code>             hash(PK)
+ item ──────────────────▶  partition 1  [ PK=A: SK1, SK2, SK3 ]  [ PK=D: ... ]
+                           partition 2  [ PK=B: ... ]
+                           partition 3  [ PK=C: ... ]
+</code></pre></div>
+<p>When we write an item, DynamoDB hashes its partition key to pick a <strong>partition</strong>. Inside a partition, items with the same PK are stored <strong>sorted by SK</strong>, which is what makes range queries on the sort key cheap.</p>
+<p>A partition holds about <strong>10 GB</strong> and serves up to <strong>3,000 read units/s and 1,000 write units/s</strong>. DynamoDB splits partitions automatically as data or traffic grows, and every write is replicated to <strong>three Availability Zones</strong> before it is acknowledged.</p>
+<p>This is why key design matters so much. Traffic spread across many PK values scales without limit. Traffic concentrated on one PK value (a <em>hot partition</em>) hits the per-partition ceiling, however much capacity the table has. We come back to this in <a href="../07-performance-and-scale/">performance &amp; scale</a>.</p>
+<h2 id="reading-data">Reading data</h2>
+<p>There are four ways to read:</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>What it does</th>
+<th>Cost profile</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GetItem</code></td>
+<td>Fetch one item by its full primary key</td>
+<td>Cheapest, constant time</td>
+</tr>
+<tr>
+<td><code>BatchGetItem</code></td>
+<td>Up to 100 <code>GetItem</code>s in one call (any tables)</td>
+<td>Same as the individual gets</td>
+</tr>
+<tr>
+<td><code>Query</code></td>
+<td>Items from <strong>one</strong> partition key, optionally narrowed by a sort-key condition (<code>=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>between</code>, <code>begins_with</code>), in SK order, forwards or backwards</td>
+<td>Pay only for items read</td>
+</tr>
+<tr>
+<td><code>Scan</code></td>
+<td>Read every item in the table or index</td>
+<td>Pays for the whole table. Batch jobs only.</td>
+</tr>
+</tbody>
+</table>
+<p>A few rules apply to all of them:</p>
+<ul>
+<li>Results come back in <strong>pages of up to 1 MB</strong>. We follow <code>LastEvaluatedKey</code> to get the next page.</li>
+<li><strong>Consistency:</strong> reads are <em>eventually consistent</em> by default. They cost half as much and may be a moment stale. Passing <code>ConsistentRead=True</code> gives a <em>strongly consistent</em> read on the table (this isn't available on GSIs).</li>
+<li><strong>Filter expressions</strong> drop items <em>after</em> they've been read. They save bandwidth, not cost.</li>
+</ul>
+<h2 id="writing-data">Writing data</h2>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PutItem</code></td>
+<td>Create or <strong>fully replace</strong> an item</td>
+</tr>
+<tr>
+<td><code>UpdateItem</code></td>
+<td>Change specific attributes (<code>SET</code>, <code>REMOVE</code>, <code>ADD</code>, <code>DELETE</code>). Creates the item if it's missing.</td>
+</tr>
+<tr>
+<td><code>DeleteItem</code></td>
+<td>Remove an item</td>
+</tr>
+<tr>
+<td><code>BatchWriteItem</code></td>
+<td>Up to 25 puts or deletes in one call. <strong>Not atomic</strong>: some may come back as <code>UnprocessedItems</code>.</td>
+</tr>
+<tr>
+<td><code>TransactWriteItems</code></td>
+<td>Up to 100 actions across tables, <strong>all or nothing</strong> (costs 2× units)</td>
+</tr>
+</tbody>
+</table>
+<p>Any single-item write can carry a <strong>condition expression</strong>, such as "only if it doesn't exist" or "only if <code>version = 3</code>". If the condition fails, the write is rejected and nothing changes. Conditions are the foundation of most of the concurrency patterns in <a href="../05-consistency/">consistency &amp; concurrency</a>.</p>
+<h2 id="expressions">Expressions</h2>
+<p>The request language is a set of small string expressions with placeholders. Here's an update that renames a user and bumps a counter, but only if the user exists:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;USER#alice&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;PROFILE&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET #n = :name ADD loginCount :one&quot;</span><span class="p">,</span>
+    <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;attribute_exists(PK)&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeNames</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;#n&quot;</span><span class="p">:</span> <span class="s2">&quot;name&quot;</span><span class="p">},</span>          <span class="c1"># &quot;name&quot; is a reserved word</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:name&quot;</span><span class="p">:</span> <span class="s2">&quot;Alice&quot;</span><span class="p">,</span> <span class="s2">&quot;:one&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">},</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>There are five kinds of expression:</p>
+<table>
+<thead>
+<tr>
+<th>Expression</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>KeyConditionExpression</code></td>
+<td>Which partition (and SK range) a <code>Query</code> reads</td>
+</tr>
+<tr>
+<td><code>FilterExpression</code></td>
+<td>Drop items after reading (Query/Scan)</td>
+</tr>
+<tr>
+<td><code>ConditionExpression</code></td>
+<td>Guard a write</td>
+</tr>
+<tr>
+<td><code>UpdateExpression</code></td>
+<td>What an <code>UpdateItem</code> changes</td>
+</tr>
+<tr>
+<td><code>ProjectionExpression</code></td>
+<td>Which attributes to return</td>
+</tr>
+</tbody>
+</table>
+<p>boto3's <code>Key("PK").eq(...)</code> and <code>Attr("status").eq(...)</code> helpers build these for us. The demos in the repo print the final expression for every request, with the names and values filled in, so we can always see exactly what was sent.</p>
+<h2 id="secondary-indexes">Secondary indexes</h2>
+<p>An index is a second copy of (some of) our data, keyed differently so we can query it another way. DynamoDB keeps it in sync automatically. There are two kinds:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Global secondary index (GSI)</th>
+<th>Local secondary index (LSI)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Keys</td>
+<td>Any partition key + optional sort key</td>
+<td>Same partition key, different sort key</td>
+</tr>
+<tr>
+<td>When created</td>
+<td>Any time</td>
+<td>Only at table creation</td>
+</tr>
+<tr>
+<td>Consistency</td>
+<td>Eventually consistent only</td>
+<td>Strong or eventual</td>
+</tr>
+<tr>
+<td>Capacity</td>
+<td>Its own</td>
+<td>Shares the table's</td>
+</tr>
+<tr>
+<td>Limits</td>
+<td>20 per table (default)</td>
+<td>5 per table. Caps each item collection at 10 GB.</td>
+</tr>
+</tbody>
+</table>
+<p>In practice, prefer GSIs. One property turns out to be very useful: items that don't have the index key attributes are left out of the index entirely. That's a <em>sparse index</em>, and it's a powerful tool. Indexes come up throughout <a href="../02-modelling/">modelling</a> and <a href="../03-querying/">querying</a>.</p>
+<h2 id="capacity-and-cost">Capacity and cost</h2>
+<p>We pay for <strong>reads</strong>, <strong>writes</strong> and <strong>storage</strong>:</p>
+<ul>
+<li><strong>1 read unit</strong> = one strongly consistent read of up to <strong>4 KB</strong> (or two eventually consistent reads). Transactional reads cost 2×.</li>
+<li><strong>1 write unit</strong> = one write of up to <strong>1 KB</strong>. Transactional writes cost 2×. Every GSI the item lands in costs another write.</li>
+<li><strong>On-demand mode:</strong> pay per request and scale instantly. <strong>Provisioned mode:</strong> reserve units per second (with auto scaling). Provisioned is cheaper for steady traffic.</li>
+<li>Item size drives cost. A 5 KB item costs 2 read units and 5 write units every time we touch it. This is why there's a whole page on <a href="../04-item-size/">item size</a>.</li>
+</ul>
+<h2 id="built-in-features">Built-in features</h2>
+<p>DynamoDB comes with a set of features that several patterns build on:</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>What it gives us</th>
+<th>Pattern</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TTL</strong></td>
+<td>Automatic, free deletion of items after a timestamp</td>
+<td><a href="../06-lifecycle-and-events/#30--ttl-for-expiry">30</a></td>
+</tr>
+<tr>
+<td><strong>Streams</strong></td>
+<td>An ordered, 24-hour log of every item change, for triggers and replication</td>
+<td><a href="../06-lifecycle-and-events/#31--dynamodb-streams--cdc">31</a></td>
+</tr>
+<tr>
+<td><strong>Transactions</strong></td>
+<td>ACID across up to 100 items</td>
+<td><a href="../05-consistency/#25--transactions">25</a></td>
+</tr>
+<tr>
+<td><strong>PITR &amp; backups</strong></td>
+<td>Restore to any second in the last 35 days</td>
+<td><a href="../08-operations/#39--point-in-time-recovery--backups">39</a></td>
+</tr>
+<tr>
+<td><strong>Global tables</strong></td>
+<td>Multi-region, active-active replication</td>
+<td><a href="../08-operations/#40--global-tables-multi-region">40</a></td>
+</tr>
+<tr>
+<td><strong>Export to S3</strong></td>
+<td>Full-table export for analytics, without using table capacity</td>
+<td><a href="../08-operations/#41--analytics-outside-dynamodb">41</a></td>
+</tr>
+<tr>
+<td><strong>DAX</strong></td>
+<td>In-memory, microsecond read cache with the same API</td>
+<td><a href="../07-performance-and-scale/#36--caching-dax--elasticache">36</a></td>
+</tr>
+<tr>
+<td><strong>PartiQL</strong></td>
+<td>SQL-like syntax (<code>SELECT * FROM t WHERE PK = ?</code>). It still only runs efficient key lookups if we write it that way.</td>
+<td>n/a</td>
+</tr>
+</tbody>
+</table>
+<h2 id="limits-worth-memorising">Limits worth memorising</h2>
+<table>
+<thead>
+<tr>
+<th>Limit</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Item size</td>
+<td>400 KB (names + values)</td>
+</tr>
+<tr>
+<td>Query / Scan page</td>
+<td>1 MB before filtering</td>
+</tr>
+<tr>
+<td>Per partition</td>
+<td>3,000 RCU/s, 1,000 WCU/s, ~10 GB</td>
+</tr>
+<tr>
+<td><code>BatchWriteItem</code> / <code>BatchGetItem</code></td>
+<td>25 / 100 items</td>
+</tr>
+<tr>
+<td>Transaction</td>
+<td>100 items, 4 MB</td>
+</tr>
+<tr>
+<td>GSIs / LSIs per table</td>
+<td>20 (soft) / 5</td>
+</tr>
+<tr>
+<td>LSI item collection</td>
+<td>10 GB</td>
+</tr>
+<tr>
+<td>Stream retention</td>
+<td>24 hours</td>
+</tr>
+<tr>
+<td>Nested attribute depth</td>
+<td>32 levels</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-mental-model-to-carry-forward">The mental model to carry forward</h2>
+<p>If we remember five things from this page, they should be these:</p>
+<ol>
+<li><strong>Start from the access patterns.</strong> Write down every question the app asks, then design keys so each one is a <code>GetItem</code> or a <code>Query</code>.</li>
+<li><strong>Store data the way it is read.</strong> Items fetched together share a partition key. Data needed on another item gets copied there.</li>
+<li><strong>Spread the load.</strong> Use high-cardinality partition keys so traffic and storage spread across partitions.</li>
+<li><strong>Keep items small</strong>, and avoid <code>Scan</code> in request paths.</li>
+<li><strong>Use conditions for correctness.</strong> Atomic updates and conditional writes replace locks.</li>
+</ol>
+<p>The rest of the series takes each of these and turns it into concrete patterns:</p>
+<table>
+<thead>
+<tr>
+<th>Page</th>
+<th>What it covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../02-modelling/">02 - Modelling</a></td>
+<td>Designing keys, single-table design, indexes, relationships</td>
+</tr>
+<tr>
+<td><a href="../03-querying/">03 - Querying</a></td>
+<td>Reading efficiently: Scan vs Query, filters, pagination, projections, batches</td>
+</tr>
+<tr>
+<td><a href="../04-item-size/">04 - Item size</a></td>
+<td>Living with the 400 KB limit and per-KB pricing</td>
+</tr>
+<tr>
+<td><a href="../05-consistency/">05 - Consistency</a></td>
+<td>Correct concurrent writes: conditions, locking, transactions, idempotency</td>
+</tr>
+<tr>
+<td><a href="../06-lifecycle-and-events/">06 - Lifecycle &amp; events</a></td>
+<td>Expiry, change streams, archival</td>
+</tr>
+<tr>
+<td><a href="../07-performance-and-scale/">07 - Performance &amp; scale</a></td>
+<td>Hot partitions, sharding, caching, time-series</td>
+</tr>
+<tr>
+<td><a href="../08-operations/">08 - Operations</a></td>
+<td>Capacity, backups, multi-region, analytics</td>
+</tr>
+<tr>
+<td><a href="../09-anti-patterns/">09 - What not to do</a></td>
+<td>What goes wrong and how to spot it</td>
+</tr>
+</tbody>
+</table>
+<p>First, though, let's see the API in action.</p>
+<h2 id="00--basics">00 · Basics</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/00-intro/00-basics/00-basics.py">00-basics.py</a> · run with <code>just run 00</code></p>
+<h3 id="problem">Problem</h3>
+<p>Before the patterns make sense, we need to be comfortable with the everyday API: how to write an item, read it back, change it, query a partition and delete it.</p>
+<h3 id="pattern">Pattern</h3>
+<p>We use one table with a composite key (<code>PK</code> partition key, <code>SK</code> sort key) holding animals:</p>
+<table>
+<thead>
+<tr>
+<th>PK</th>
+<th>SK</th>
+<th>attributes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ANIMAL#dog</code></td>
+<td><code>Bella</code></td>
+<td>age</td>
+</tr>
+<tr>
+<td><code>ANIMAL#dog</code></td>
+<td><code>Rex</code></td>
+<td>age, breed, tags (string set)</td>
+</tr>
+<tr>
+<td><code>ANIMAL#cat</code></td>
+<td><code>Tom</code></td>
+<td>age, owner (map)</td>
+</tr>
+</tbody>
+</table>
+<p>The script walks through each core operation in turn:</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Call</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Create / replace</td>
+<td><code>put_item(Item=...)</code></td>
+<td>Replaces the whole item if the key exists</td>
+</tr>
+<tr>
+<td>Read one</td>
+<td><code>get_item(Key=...)</code></td>
+<td>Needs the full key. Missing items return no <code>Item</code>, not an error.</td>
+</tr>
+<tr>
+<td>Change some attributes</td>
+<td><code>update_item(UpdateExpression="SET ... REMOVE ...")</code></td>
+<td><code>ReturnValues="ALL_NEW"</code> returns the result</td>
+</tr>
+<tr>
+<td>Read a partition</td>
+<td><code>query(KeyConditionExpression=Key("PK").eq(...))</code></td>
+<td>Sorted by SK. <code>ScanIndexForward=False</code> reverses.</td>
+</tr>
+<tr>
+<td>Narrow by sort key</td>
+<td><code>&amp; Key("SK").begins_with("R")</code></td>
+<td>Also <code>between</code>, <code>&lt;</code>, <code>&gt;</code>, <code>=</code></td>
+</tr>
+<tr>
+<td>Guarded write</td>
+<td><code>ConditionExpression="attribute_not_exists(PK)"</code></td>
+<td>Raises <code>ConditionalCheckFailedException</code></td>
+</tr>
+<tr>
+<td>Delete</td>
+<td><code>delete_item(Key=..., ReturnValues="ALL_OLD")</code></td>
+<td>Returns the deleted item</td>
+</tr>
+<tr>
+<td>Read everything</td>
+<td><code>scan()</code></td>
+<td>Reads the whole table. Avoid outside batch jobs.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice">In practice</h3>
+<p>Here's the heart of the script, from the update onwards:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="c1"># UpdateItem: change some attributes, leave the rest. ReturnValues shows the result.</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;ANIMAL#dog&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;Rex&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET age = age + :one, last_vet = :d REMOVE breed&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:one&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s2">&quot;:d&quot;</span><span class="p">:</span> <span class="s2">&quot;2026-10-20&quot;</span><span class="p">},</span>
+    <span class="n">ReturnValues</span><span class="o">=</span><span class="s2">&quot;ALL_NEW&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Query with a sort key condition, descending SK.</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">table</span><span class="o">.</span><span class="n">query</span><span class="p">(</span>
+    <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;ANIMAL#dog&quot;</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">Key</span><span class="p">(</span><span class="s2">&quot;SK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">begins_with</span><span class="p">(</span><span class="s2">&quot;R&quot;</span><span class="p">),</span>
+    <span class="n">ScanIndexForward</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Conditional write: only create if it doesn&#39;t already exist.</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">put_item</span><span class="p">(</span><span class="n">Item</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;ANIMAL#dog&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;Rex&quot;</span><span class="p">,</span> <span class="s2">&quot;age&quot;</span><span class="p">:</span> <span class="mi">0</span><span class="p">},</span> <span class="n">ConditionExpression</span><span class="o">=</span><span class="s2">&quot;attribute_not_exists(PK)&quot;</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">table</span><span class="o">.</span><span class="n">meta</span><span class="o">.</span><span class="n">client</span><span class="o">.</span><span class="n">exceptions</span><span class="o">.</span><span class="n">ConditionalCheckFailedException</span><span class="p">:</span>
+    <span class="n">show</span><span class="p">(</span><span class="s2">&quot;Conditional put rejected&quot;</span><span class="p">,</span> <span class="s2">&quot;Rex already exists, nothing was overwritten&quot;</span><span class="p">)</span>
+</code></pre></div>
+<p>And here's what it sends and gets back:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p00-basics
+    item:       {PK: &#39;ANIMAL#dog&#39;, SK: &#39;Rex&#39;, age: 4, breed: &#39;labrador&#39;, tags: {&#39;good&#39;, &#39;loud&#39;}}
+
+&gt;&gt;&gt; GetItem p00-basics
+    key:        {PK: &#39;ANIMAL#dog&#39;, SK: &#39;Nope&#39;}
+
+=== GetItem missing key ===
+false
+
+&gt;&gt;&gt; UpdateItem p00-basics
+    key:        {PK: &#39;ANIMAL#dog&#39;, SK: &#39;Rex&#39;}
+    update:     SET age = age + 1, last_vet = &#39;2026-10-20&#39; REMOVE breed
+    ReturnValues: ALL_NEW
+
+=== UpdateItem Rex (age+1, set last_vet, remove breed) ===
+{
+  &quot;SK&quot;: &quot;Rex&quot;,
+  &quot;PK&quot;: &quot;ANIMAL#dog&quot;,
+  &quot;last_vet&quot;: &quot;2026-10-20&quot;,
+  &quot;age&quot;: 5,
+  &quot;tags&quot;: [
+    &quot;good&quot;,
+    &quot;loud&quot;
+  ]
+}
+
+&gt;&gt;&gt; Query p00-basics
+    key:        PK = &#39;ANIMAL#dog&#39;
+
+=== Query all dogs ===
+[
+  {
+    &quot;SK&quot;: &quot;Bella&quot;,
+    &quot;age&quot;: 2,
+    &quot;PK&quot;: &quot;ANIMAL#dog&quot;
+  },
+  {
+    &quot;SK&quot;: &quot;Rex&quot;,
+    ...
+  }
+]
+
+&gt;&gt;&gt; Query p00-basics
+    key:        (PK = &#39;ANIMAL#dog&#39; AND begins_with(SK, &#39;R&#39;))
+    ScanIndexForward: False
+
+&gt;&gt;&gt; PutItem p00-basics
+    item:       {PK: &#39;ANIMAL#dog&#39;, SK: &#39;Rex&#39;, age: 0}
+    condition:  attribute_not_exists(PK)
+
+=== Conditional put rejected ===
+&quot;Rex already exists, nothing was overwritten&quot;
+
+&gt;&gt;&gt; DeleteItem p00-basics
+    key:        {PK: &#39;ANIMAL#cat&#39;, SK: &#39;Tom&#39;}
+    ReturnValues: ALL_OLD
+
+=== DeleteItem Tom (old value) ===
+{
+  &quot;SK&quot;: &quot;Tom&quot;,
+  &quot;owner&quot;: {
+    &quot;name&quot;: &quot;Sam&quot;,
+    &quot;city&quot;: &quot;Leeds&quot;
+  },
+  &quot;PK&quot;: &quot;ANIMAL#cat&quot;,
+  &quot;age&quot;: 7
+}
+
+&gt;&gt;&gt; Scan p00-basics
+</code></pre></div>
+<p>A few things stand out. The <code>GetItem</code> on a missing key quietly returns no item rather than raising. The update expression is shown with the real values substituted in, and <code>REMOVE breed</code> really does drop the attribute from the returned item. The query for all dogs comes back sorted by sort key (<code>Bella</code> before <code>Rex</code>). And the conditional put is rejected without touching the existing <code>Rex</code>.</p>
+<h3 id="why">Why</h3>
+<p>Every pattern in this series is a combination of these calls with carefully chosen keys. It's worth watching the printed <code>&gt;&gt;&gt;</code> requests to see the expressions boto3 actually sends, because that's what DynamoDB evaluates and bills us for.</p>
+<h3 id="gotchas">Gotchas</h3>
+<ul>
+<li><code>put_item</code> <strong>replaces</strong> the whole item. Use <code>update_item</code> to change some attributes.</li>
+<li>Numbers come back as <code>Decimal</code>, and sets come back as a Python <code>set</code>.</li>
+<li>Words like <code>name</code>, <code>status</code> and <code>date</code> are reserved in expressions. Use <code>ExpressionAttributeNames</code> (<code>#n</code>) to refer to them.</li>
+</ul>
+<h2 id="01--local-development">01 · Local development</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/01-setup/01-local-development/01-local-development.py">01-local-development.py</a> · run with <code>just run 01</code> (needs <code>just up</code>)</p>
+<h3 id="problem_1">Problem</h3>
+<p>Developing straight against AWS is slow, costs money, needs credentials, and lets tests collide in shared tables. Mocking boto3 by hand isn't much better: it misses real behaviour like condition failures, key validation and GSI queries.</p>
+<h3 id="pattern_1">Pattern</h3>
+<p>We run <strong>DynamoDB Local</strong>, AWS's own emulator, in Docker. It speaks the same API, so the same boto3 code works locally and in AWS. The only switch is the endpoint:</p>
+<div class="highlight"><span class="filename">YAML</span><pre><span></span><code><span class="c1"># docker-compose.yml (this repo)</span>
+<span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">dynamodb-local</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">amazon/dynamodb-local:latest</span>
+<span class="w">    </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;-jar</span><span class="nv"> </span><span class="s">DynamoDBLocal.jar</span><span class="nv"> </span><span class="s">-sharedDb</span><span class="nv"> </span><span class="s">-dbPath</span><span class="nv"> </span><span class="s">./data&quot;</span>
+<span class="w">    </span><span class="nt">ports</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;8000:8000&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;./docker/dynamodb:/home/dynamodblocal/data&quot;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">endpoint</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;DYNAMODB_ENDPOINT&quot;</span><span class="p">)</span>  <span class="c1"># unset in prod</span>
+<span class="n">boto3</span><span class="o">.</span><span class="n">resource</span><span class="p">(</span><span class="s2">&quot;dynamodb&quot;</span><span class="p">,</span> <span class="n">endpoint_url</span><span class="o">=</span><span class="n">endpoint</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+</code></pre></div>
+<p>Everything in the repo reads <code>DYNAMODB_ENDPOINT</code>. In production we leave it unset, and the normal AWS credential chain takes over.</p>
+<p>For tests, we give <strong>each test its own uniquely named table</strong> and always delete it afterwards. The script does this with a <code>temp_table()</code> context manager; a pytest fixture works just as well. Each lesson in the repo follows the same idea by dropping and recreating its own <code>pNN-*</code> table, so runs never interfere. The tables should be built from the same definition as production, ideally exported from our IaC (CDK, Terraform, CloudFormation).</p>
+<p>DynamoDB Local isn't the only option:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Good for</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DynamoDB Local</strong></td>
+<td>realistic API behaviour, streams, PartiQL, transactions</td>
+<td>official; Java/Docker</td>
+</tr>
+<tr>
+<td><strong>LocalStack</strong></td>
+<td>DynamoDB <em>plus</em> S3, Lambda, SQS, etc.</td>
+<td>wraps DynamoDB Local for DynamoDB</td>
+</tr>
+<tr>
+<td><strong>moto</strong></td>
+<td>fast in-process unit tests, no Docker</td>
+<td><code>@mock_aws</code>; less faithful</td>
+</tr>
+</tbody>
+</table>
+<h3 id="in-practice_1">In practice</h3>
+<p>The script fails fast if the container isn't running, then runs two tests, each against a throwaway table:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="nd">@contextmanager</span>
+<span class="k">def</span> <span class="nf">temp_table</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="s2">&quot;p01-test&quot;</span><span class="p">):</span>
+    <span class="n">name</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">prefix</span><span class="si">}</span><span class="s2">-</span><span class="si">{</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">()</span><span class="o">.</span><span class="n">hex</span><span class="p">[:</span><span class="mi">8</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">table</span> <span class="o">=</span> <span class="n">ddb</span><span class="o">.</span><span class="n">create_table</span><span class="p">(</span><span class="n">TableName</span><span class="o">=</span><span class="n">name</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>  <span class="c1"># same definition as prod</span>
+    <span class="n">table</span><span class="o">.</span><span class="n">wait_until_exists</span><span class="p">()</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">yield</span> <span class="n">table</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">table</span><span class="o">.</span><span class="n">delete</span><span class="p">()</span>
+
+
+<span class="k">for</span> <span class="n">test</span> <span class="ow">in</span> <span class="p">(</span><span class="n">test_create_user</span><span class="p">,</span> <span class="n">test_duplicate_user_rejected</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">temp_table</span><span class="p">()</span> <span class="k">as</span> <span class="n">t</span><span class="p">:</span>
+        <span class="n">test</span><span class="p">(</span><span class="n">t</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  PASS </span><span class="si">{</span><span class="n">test</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2">  (table </span><span class="si">{</span><span class="n">t</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>=== Connected to http://localhost:8000 ===
+{
+  &quot;existing tables&quot;: 50
+}
+
+=== Running tests, each against its own throwaway table ===
+
+&gt;&gt;&gt; PutItem p01-test-c067a46e
+    item:       {PK: &#39;USER#1&#39;, SK: &#39;PROFILE&#39;, name: &#39;Ada&#39;}
+
+&gt;&gt;&gt; GetItem p01-test-c067a46e
+    key:        {PK: &#39;USER#1&#39;, SK: &#39;PROFILE&#39;}
+  PASS test_create_user  (table p01-test-c067a46e)
+
+&gt;&gt;&gt; PutItem p01-test-4e1a63bc
+    item:       {PK: &#39;USER#1&#39;, SK: &#39;PROFILE&#39;}
+
+&gt;&gt;&gt; PutItem p01-test-4e1a63bc
+    item:       {PK: &#39;USER#1&#39;, SK: &#39;PROFILE&#39;}
+    condition:  attribute_not_exists(PK)
+  PASS test_duplicate_user_rejected  (table p01-test-4e1a63bc)
+
+=== Test tables left behind ===
+[]
+</code></pre></div>
+<p>Each test gets its own randomly named table, and the duplicate-user test passes because DynamoDB Local really does reject the conditional put. That's exactly the kind of behaviour a hand-written mock would miss. At the end, no test tables are left behind.</p>
+<h3 id="why_1">Why</h3>
+<ul>
+<li><strong>Fast and free.</strong> No network round trip to AWS, and no bill.</li>
+<li><strong>Realistic.</strong> It catches condition, key and index mistakes that hand-written mocks don't.</li>
+<li><strong>Isolated.</strong> Unique tables per test mean parallel test runs don't interfere.</li>
+</ul>
+<h3 id="trade-offs">Trade-offs</h3>
+<p>DynamoDB Local covers tables, indexes, streams, transactions and PartiQL. What it <strong>doesn't</strong> do matters just as much, and the patterns that need these features simulate them instead:</p>
+<ul>
+<li>There's no throttling or capacity limit, so performance looks better than reality (<a href="../08-operations/#38--capacity-modes-on-demand-vs-provisioned">38</a>, <a href="../03-querying/#16--batch-operations-with-retries">16</a>).</li>
+<li>TTL never actually deletes items (<a href="../06-lifecycle-and-events/#30--ttl-for-expiry">30</a>).</li>
+<li>There's no PITR or backups (<a href="../08-operations/#39--point-in-time-recovery--backups">39</a>), no global tables (<a href="../08-operations/#40--global-tables-multi-region">40</a>), no exports (<a href="../08-operations/#41--analytics-outside-dynamodb">41</a>) and no DAX (<a href="../07-performance-and-scale/#36--caching-dax--elasticache">36</a>).</li>
+<li>GSIs update immediately, so eventual-consistency bugs don't show up (<a href="../05-consistency/#28--gsis-are-eventually-consistent">28</a>).</li>
+</ul>
+<p>Because of this, keep a small integration suite that runs against a real AWS account in CI.</p>
+<h3 id="gotchas_1">Gotchas</h3>
+<ul>
+<li><strong><code>-sharedDb</code>:</strong> without it, each access key + region combination gets a <em>separate</em> database. That leads to "my table disappeared" confusion when two tools use different dummy keys.</li>
+<li><code>-inMemory</code> is faster for tests, but loses data on restart. <code>-dbPath</code> persists. This repo stores its data in <code>docker/dynamodb/</code>, which should be kept out of git.</li>
+<li>Region and credentials must still be set, even though their values are ignored.</li>
+</ul>
+<p>With the vocabulary, the API and a local database in place, we're ready for the heart of DynamoDB: <a href="../02-modelling/">modelling</a>.</p>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/">DynamoDB patterns</a> | <a href="/posts/08-dynamodb-patterns/02-modelling/">02 - Modelling</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

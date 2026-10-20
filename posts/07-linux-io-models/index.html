@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Linux I/O models</title>
 <link rel="icon" href="/favicon/favicon.ico">
-<link rel="stylesheet" href="/style.css?v=3">
+<link rel="stylesheet" href="/style.css?v=5">
 
 </head>
 <body>
@@ -29,33 +29,33 @@
 <p>I/O is the process of reading &amp; writing data, to a file, a stream or a socket. Each Linux process keeps track of which of these are open in its <strong>File Descriptor Table</strong>.</p>
 <p>Initially, a process has 3 FDs: <code>stdin</code>, <code>stdout</code> and <code>stderr</code>. You can inspect a process' FDs through <code>/proc/&lt;PID&gt;/fd/*</code> (or <code>/proc/self/fd/*</code> from within the process).</p>
 <p>Let's take a very simple <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/00-fd-demo/main.c">fd-demo</a>:</p>
-<pre><code class="language-c">// 00-fd-demo/main.c
-#include &lt;stdio.h&gt;
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="c1">// 00-fd-demo/main.c</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span>
 
-int main(void)
-{
-    char line[256];
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">line</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
 
-    // stdin/stdout/stderr
-    fgets(line, sizeof line, stdin);
-    printf(&quot;out: %s&quot;, line);
-    fprintf(stderr, &quot;err: %s&quot;, line);
+<span class="w">    </span><span class="c1">// stdin/stdout/stderr</span>
+<span class="w">    </span><span class="n">fgets</span><span class="p">(</span><span class="n">line</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">line</span><span class="p">,</span><span class="w"> </span><span class="n">stdin</span><span class="p">);</span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;out: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">line</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;err: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">line</span><span class="p">);</span>
 
-    // adding an fd:
-    FILE *log = fopen(&quot;log.txt&quot;, &quot;w&quot;);
-    fprintf(log, &quot;log: %s&quot;, line);
-    fclose(log);
+<span class="w">    </span><span class="c1">// adding an fd:</span>
+<span class="w">    </span><span class="kt">FILE</span><span class="w"> </span><span class="o">*</span><span class="n">log</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fopen</span><span class="p">(</span><span class="s">&quot;log.txt&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;w&quot;</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">log</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;log: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">line</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fclose</span><span class="p">(</span><span class="n">log</span><span class="p">);</span>
 
-    return 0;
-}
-</code></pre>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
 <p>Let's compile it and step through it with <code>gdb</code>:</p>
-<pre><code class="language-sh">cd 00-fd-demo
-gcc -g main.c -o main # note the -g is for debugging.
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code><span class="nb">cd</span><span class="w"> </span><span class="m">00</span>-fd-demo
+gcc<span class="w"> </span>-g<span class="w"> </span>main.c<span class="w"> </span>-o<span class="w"> </span>main<span class="w"> </span><span class="c1"># note the -g is for debugging.</span>
 
-gdb ./main
-</code></pre>
-<pre><code class="language-txt">(gdb) info proc
+gdb<span class="w"> </span>./main
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>(gdb) info proc
 (gdb) run
 (gdb) n
 ...
@@ -78,7 +78,7 @@ l-wx------ 1 user group 64 Oct  6 09:41 3 -&gt; /path/to/linux-io-models/00-fd-d
 lrwx------ 1 user group 64 Oct  6 09:41 0 -&gt; /dev/pts/0
 lrwx------ 1 user group 64 Oct  6 09:41 1 -&gt; /dev/pts/0
 lrwx------ 1 user group 64 Oct  6 09:41 2 -&gt; /dev/pts/0
-</code></pre>
+</code></pre></div>
 <p>As you can see, a new FD (<code>3</code>) is recorded in the process when we open the file, and removed once we close it. FDs <code>0</code>, <code>1</code> and <code>2</code> are <code>stdin</code>, <code>stdout</code> and <code>stderr</code>, all pointing at the terminal (<code>/dev/pts/0</code>).</p>
 <p>Everything that follows is about how a process waits on one (or many) of these FDs.</p>
 <hr />
@@ -87,10 +87,10 @@ lrwx------ 1 user group 64 Oct  6 09:41 2 -&gt; /dev/pts/0
 <p>System calls: <code>read()</code> and <code>write()</code>. This is the default.</p>
 <p>Under the hood, the thread sleeps until the data has been copied from kernel space into the user space buffer.</p>
 <p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/01-blocking-io/main.c">example</a>. Here, the important line is:</p>
-<pre><code class="language-c">// ...
-    ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
-// ...
-</code></pre>
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="c1">// ...</span>
+<span class="w">    </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">read</span><span class="p">(</span><span class="n">STDIN_FILENO</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span>
+<span class="c1">// ...</span>
+</code></pre></div>
 <p>This reads from the <code>stdin</code> FD into the empty buffer <code>buf</code>.</p>
 <p>To make the wait visible, we pipe in <code>(sleep 3; echo hi)</code>, which:</p>
 <ol>
@@ -99,17 +99,17 @@ lrwx------ 1 user group 64 Oct  6 09:41 2 -&gt; /dev/pts/0
 <li>pipes the "hi" into our <code>./main</code>.</li>
 </ol>
 <p>Our program starts straight away, but can only read the data once it is in the pipe:</p>
-<pre><code class="language-sh"># compile
-gcc -O0 main.c -g -o main
-# inspect
-(sleep 3; echo hi) | strace -T -e trace=read,fcntl ./main
-# output:
-# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000122&gt;
-## sleeps for 3 seconds
-# read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;2.996911&gt;
-# read 3 bytes
-# +++ exited with 0 +++
-</code></pre>
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code><span class="c1"># compile</span>
+gcc<span class="w"> </span>-O0<span class="w"> </span>main.c<span class="w"> </span>-g<span class="w"> </span>-o<span class="w"> </span>main
+<span class="c1"># inspect</span>
+<span class="o">(</span>sleep<span class="w"> </span><span class="m">3</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>hi<span class="o">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>strace<span class="w"> </span>-T<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>read,fcntl<span class="w"> </span>./main
+<span class="c1"># output:</span>
+<span class="c1"># read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000122&gt;</span>
+<span class="c1">## sleeps for 3 seconds</span>
+<span class="c1"># read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;2.996911&gt;</span>
+<span class="c1"># read 3 bytes</span>
+<span class="c1"># +++ exited with 0 +++</span>
+</code></pre></div>
 <p>(The first <code>read(3, "\177ELF...")</code> is just the dynamic loader reading <code>libc</code>, you'll see it in every example.)</p>
 <p>The <code>-T</code> flag shows the time spent in each syscall: <code>&lt;2.996911&gt;</code>. The main thread was stuck inside <code>read()</code> for the full 3 seconds, unable to do anything else.</p>
 <hr />
@@ -118,42 +118,42 @@ gcc -O0 main.c -g -o main
 <p>System calls: <code>read()</code> and <code>write()</code>, with the additional <code>O_NONBLOCK</code> flag set on the FD.</p>
 <p>Under the hood, if the data isn't ready, <code>read()</code> returns straight away with an error. The thread can then do some work and poll the kernel again later.</p>
 <p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/02-non-blocking-io/main.c">example</a>. Here, the important lines are:</p>
-<pre><code class="language-c">    // adding the flags including `O_NONBLOCK`.
-    int fl = fcntl(0, F_GETFL);
-    fcntl(0, F_SETFL, fl | O_NONBLOCK);
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="w">    </span><span class="c1">// adding the flags including `O_NONBLOCK`.</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">fl</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fcntl</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">F_GETFL</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fcntl</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">F_SETFL</span><span class="p">,</span><span class="w"> </span><span class="n">fl</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">O_NONBLOCK</span><span class="p">);</span>
 
-// ...
-    for (int tries = 0;; tries++) {
-        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
-        // ...
-        if (errno != EAGAIN)
-        {
-            perror(&quot;read&quot;);
-            break;
-        }
-        usleep(1000); // busy doing work.
-        // ...
-    }
-// ...
-</code></pre>
+<span class="c1">// ...</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">tries</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;;</span><span class="w"> </span><span class="n">tries</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">read</span><span class="p">(</span><span class="n">STDIN_FILENO</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// ...</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errno</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">EAGAIN</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;read&quot;</span><span class="p">);</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span><span class="n">usleep</span><span class="p">(</span><span class="mi">1000</span><span class="p">);</span><span class="w"> </span><span class="c1">// busy doing work.</span>
+<span class="w">        </span><span class="c1">// ...</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="c1">// ...</span>
+</code></pre></div>
 <p>This time, with the same <code>(sleep 3; echo hi)</code>, the main thread is not blocked (it can do work):</p>
-<pre><code class="language-sh"># compile
-gcc -O0 main.c -g -o main
-# inspect
-(sleep 3; echo hi) | strace -T -e trace=read,fcntl ./main
-# output:
-# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000073&gt;
-# fcntl(0, F_GETFL)                       = 0 (flags O_RDONLY) &lt;0.000077&gt;
-# fcntl(0, F_SETFL, O_RDONLY|O_NONBLOCK)  = 0 &lt;0.000076&gt;
-# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000047&gt;
-# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000063&gt;
-# ... 3 seconds worth of these.
-# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000046&gt;
-# read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000065&gt;
-# read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;0.000182&gt;
-# got 3 bytes after 29 tries
-# +++ exited with 0 +++
-</code></pre>
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code><span class="c1"># compile</span>
+gcc<span class="w"> </span>-O0<span class="w"> </span>main.c<span class="w"> </span>-g<span class="w"> </span>-o<span class="w"> </span>main
+<span class="c1"># inspect</span>
+<span class="o">(</span>sleep<span class="w"> </span><span class="m">3</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>hi<span class="o">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>strace<span class="w"> </span>-T<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>read,fcntl<span class="w"> </span>./main
+<span class="c1"># output:</span>
+<span class="c1"># read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000073&gt;</span>
+<span class="c1"># fcntl(0, F_GETFL)                       = 0 (flags O_RDONLY) &lt;0.000077&gt;</span>
+<span class="c1"># fcntl(0, F_SETFL, O_RDONLY|O_NONBLOCK)  = 0 &lt;0.000076&gt;</span>
+<span class="c1"># read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000047&gt;</span>
+<span class="c1"># read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000063&gt;</span>
+<span class="c1"># ... 3 seconds worth of these.</span>
+<span class="c1"># read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000046&gt;</span>
+<span class="c1"># read(0, 0xffffc4190c88, 4096)           = -1 EAGAIN (Resource temporarily unavailable) &lt;0.000065&gt;</span>
+<span class="c1"># read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;0.000182&gt;</span>
+<span class="c1"># got 3 bytes after 29 tries</span>
+<span class="c1"># +++ exited with 0 +++</span>
+</code></pre></div>
 <p>We now get an <code>EAGAIN</code> error code, which means "nothing here yet, try again". Each <code>read()</code> takes microseconds instead of seconds, so the thread is free between calls.</p>
 <p>The flow for the program is:</p>
 <ol>
@@ -169,49 +169,49 @@ gcc -O0 main.c -g -o main
 <p>System calls: <code>select()</code>, <code>poll()</code>, <code>epoll_wait()</code>.</p>
 <p>Multiplexing takes <a href="#1-blocking-io">1. Blocking I/O</a> and applies it to many FDs. Rather than blocking inside <code>read()</code>, we block inside <code>poll()</code>, which tells us which FD is ready. Then, the <code>read()</code> on that FD is guaranteed not to block.</p>
 <p><code>poll</code> takes a list of <code>pollfd</code>:</p>
-<pre><code class="language-c">struct pollfd {
-    int   fd;         /* file descriptor */
-    short events;     /* requested events */
-    short revents;    /* returned events */
-};
-</code></pre>
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="k">struct</span><span class="w"> </span><span class="nc">pollfd</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w">   </span><span class="n">fd</span><span class="p">;</span><span class="w">         </span><span class="cm">/* file descriptor */</span>
+<span class="w">    </span><span class="kt">short</span><span class="w"> </span><span class="n">events</span><span class="p">;</span><span class="w">     </span><span class="cm">/* requested events */</span>
+<span class="w">    </span><span class="kt">short</span><span class="w"> </span><span class="n">revents</span><span class="p">;</span><span class="w">    </span><span class="cm">/* returned events */</span>
+<span class="p">};</span>
+</code></pre></div>
 <p><code>events</code> goes from user to kernel space ("tell me when this happens"), and <code>revents</code> (r = returned) goes from kernel to user space ("this is what happened"). Have a look at <code>man 2 poll</code> for all the event types.</p>
 <p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/03-multiplexing-io/main.c">example</a>. Here, the important lines are:</p>
-<pre><code class="language-c">    // define a list of pollfds
-    struct pollfd fds[MAX_FDS];
-    // open the file descriptors
-    for (int i = 0; i &lt; nfds; i++)
-    {
-        fds[i].fd = open(argv[i + 1], O_RDONLY);
-        // ...
-        fds[i].events = POLLIN; // tell me when it's readable
-    }
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="w">    </span><span class="c1">// define a list of pollfds</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">pollfd</span><span class="w"> </span><span class="n">fds</span><span class="p">[</span><span class="n">MAX_FDS</span><span class="p">];</span>
+<span class="w">    </span><span class="c1">// open the file descriptors</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nfds</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="n">fds</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">fd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="n">i</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="n">O_RDONLY</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// ...</span>
+<span class="w">        </span><span class="n">fds</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">events</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">POLLIN</span><span class="p">;</span><span class="w"> </span><span class="c1">// tell me when it&#39;s readable</span>
+<span class="w">    </span><span class="p">}</span>
 
-    while (remaining &gt; 0)
-    {
-        // Sleep until at least one fd is ready (-1 = no timeout)
-        int ready = poll(fds, nfds, -1);
-        // ...
-        for (int i = 0; i &lt; nfds; i++)
-        {
-            if (!(fds[i].revents &amp; (POLLIN | POLLHUP | POLLERR)))
-                continue; // this one isn't ready
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">remaining</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Sleep until at least one fd is ready (-1 = no timeout)</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">ready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">poll</span><span class="p">(</span><span class="n">fds</span><span class="p">,</span><span class="w"> </span><span class="n">nfds</span><span class="p">,</span><span class="w"> </span><span class="mi">-1</span><span class="p">);</span>
+<span class="w">        </span><span class="c1">// ...</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nfds</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">fds</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">revents</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="p">(</span><span class="n">POLLIN</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">POLLHUP</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">POLLERR</span><span class="p">)))</span>
+<span class="w">                </span><span class="k">continue</span><span class="p">;</span><span class="w"> </span><span class="c1">// this one isn&#39;t ready</span>
 
-            char buf[4096];
-            ssize_t n = read(fds[i].fd, buf, sizeof buf); // won't block: poll said ready
-            if (n &gt; 0)
-            {
-                printf(&quot;source %d: %.*s&quot;, i, (int)n, buf);
-            }
-            else
-            { // 0 = EOF (or error): stop watching it
-                close(fds[i].fd);
-                fds[i].fd = -1; // poll ignores negative fds
-                remaining--;
-            }
-        }
-    }
-</code></pre>
+<span class="w">            </span><span class="kt">char</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">4096</span><span class="p">];</span>
+<span class="w">            </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">read</span><span class="p">(</span><span class="n">fds</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span><span class="w"> </span><span class="c1">// won&#39;t block: poll said ready</span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">n</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
+<span class="w">            </span><span class="p">{</span>
+<span class="w">                </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;source %d: %.*s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">            </span><span class="k">else</span>
+<span class="w">            </span><span class="p">{</span><span class="w"> </span><span class="c1">// 0 = EOF (or error): stop watching it</span>
+<span class="w">                </span><span class="n">close</span><span class="p">(</span><span class="n">fds</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">fd</span><span class="p">);</span>
+<span class="w">                </span><span class="n">fds</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">fd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-1</span><span class="p">;</span><span class="w"> </span><span class="c1">// poll ignores negative fds</span>
+<span class="w">                </span><span class="n">remaining</span><span class="o">--</span><span class="p">;</span>
+<span class="w">            </span><span class="p">}</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+</code></pre></div>
 <p>The flow is:</p>
 <ol>
 <li>Register the file descriptors.</li>
@@ -219,28 +219,28 @@ gcc -O0 main.c -g -o main
 <li>Read from the ready FDs. This won't block since the data has arrived (as signalled by step 2).</li>
 </ol>
 <p>With <a href="#1-blocking-io">1. Blocking I/O</a>, running 2 I/O operations in a single thread runs them sequentially. With multiplexing, they run concurrently. Let's feed in a slow source (3s) and a fast one (1s):</p>
-<pre><code class="language-sh"># compile
-gcc -O0 main.c -g -o main
-# inspect
-time strace -T -e trace=read,ppoll ./main &lt;(sleep 3; echo slow) &lt;(sleep 1; echo fast)
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code><span class="c1"># compile</span>
+gcc<span class="w"> </span>-O0<span class="w"> </span>main.c<span class="w"> </span>-g<span class="w"> </span>-o<span class="w"> </span>main
+<span class="c1"># inspect</span>
+<span class="nb">time</span><span class="w"> </span>strace<span class="w"> </span>-T<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>read,ppoll<span class="w"> </span>./main<span class="w"> </span>&lt;<span class="o">(</span>sleep<span class="w"> </span><span class="m">3</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>slow<span class="o">)</span><span class="w"> </span>&lt;<span class="o">(</span>sleep<span class="w"> </span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>fast<span class="o">)</span>
 
-# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000116&gt;
-# ppoll([{fd=3, events=POLLIN}, {fd=4, events=POLLIN}], 2, NULL, NULL, 0) = 1 ([{fd=4, revents=POLLIN}]) &lt;0.995887&gt;
-# read(4, &quot;fast\n&quot;, 4096)                 = 5 &lt;0.000010&gt;
-# source 1: fast
-# ppoll([{fd=3, events=POLLIN}, {fd=4, events=POLLIN}], 2, NULL, NULL, 0) = 1 ([{fd=4, revents=POLLHUP}]) &lt;0.000052&gt;
-# read(4, &quot;&quot;, 4096)                       = 0 &lt;0.000087&gt;
-# ppoll([{fd=3, events=POLLIN}, {fd=-1}], 2, NULL, NULL, 0) = 1 ([{fd=3, revents=POLLIN}]) &lt;1.998587&gt;
-# read(3, &quot;slow\n&quot;, 4096)                 = 5 &lt;0.000037&gt;
-# source 0: slow
-# ppoll([{fd=3, events=POLLIN}, {fd=-1}], 2, NULL, NULL, 0) = 1 ([{fd=3, revents=POLLHUP}]) &lt;0.000047&gt;
-# read(3, &quot;&quot;, 4096)                       = 0 &lt;0.000046&gt;
-# +++ exited with 0 +++
+<span class="c1"># read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000116&gt;</span>
+<span class="c1"># ppoll([{fd=3, events=POLLIN}, {fd=4, events=POLLIN}], 2, NULL, NULL, 0) = 1 ([{fd=4, revents=POLLIN}]) &lt;0.995887&gt;</span>
+<span class="c1"># read(4, &quot;fast\n&quot;, 4096)                 = 5 &lt;0.000010&gt;</span>
+<span class="c1"># source 1: fast</span>
+<span class="c1"># ppoll([{fd=3, events=POLLIN}, {fd=4, events=POLLIN}], 2, NULL, NULL, 0) = 1 ([{fd=4, revents=POLLHUP}]) &lt;0.000052&gt;</span>
+<span class="c1"># read(4, &quot;&quot;, 4096)                       = 0 &lt;0.000087&gt;</span>
+<span class="c1"># ppoll([{fd=3, events=POLLIN}, {fd=-1}], 2, NULL, NULL, 0) = 1 ([{fd=3, revents=POLLIN}]) &lt;1.998587&gt;</span>
+<span class="c1"># read(3, &quot;slow\n&quot;, 4096)                 = 5 &lt;0.000037&gt;</span>
+<span class="c1"># source 0: slow</span>
+<span class="c1"># ppoll([{fd=3, events=POLLIN}, {fd=-1}], 2, NULL, NULL, 0) = 1 ([{fd=3, revents=POLLHUP}]) &lt;0.000047&gt;</span>
+<span class="c1"># read(3, &quot;&quot;, 4096)                       = 0 &lt;0.000046&gt;</span>
+<span class="c1"># +++ exited with 0 +++</span>
 
-# real    0m3.009s
-# user    0m0.001s
-# sys     0m0.014s
-</code></pre>
+<span class="c1"># real    0m3.009s</span>
+<span class="c1"># user    0m0.001s</span>
+<span class="c1"># sys     0m0.014s</span>
+</code></pre></div>
 <p>The whole thing takes <strong>3 seconds, not 3 + 1 seconds</strong>: the two waits overlap.</p>
 <p>Reading the trace: the first <code>ppoll</code> wakes up after ~1s with FD 4 (<code>fast</code>) ready. The next <code>ppoll</code> returns <code>POLLHUP</code> (hang up, no more data) for FD 4, so we close it. The last <code>ppoll</code>s wait the remaining ~2s for FD 3 (<code>slow</code>).</p>
 <p>One drawback of <code>select</code>/<code>poll</code> is that every call hands the kernel the full list of FDs, and the kernel (and then your program) scans all of it to find the ready ones: <code>O(N)</code> per call. This is fine for a handful of FDs, but not for a server with 10k connections. That's what <code>epoll</code> fixes: you register FDs once, and <code>epoll_wait</code> only returns the ones that are ready. It's the same model, just scalable, and it's what most runtimes use under the hood (more on that <a href="#so-what-does-my-higher-level-language-use">below</a>).</p>
@@ -251,36 +251,36 @@ time strace -T -e trace=read,ppoll ./main &lt;(sleep 3; echo slow) &lt;(sleep 1;
 <p>In both <a href="#2-non-blocking-io">2. Non-blocking I/O</a> and <a href="#3-io-multiplexing">3. I/O multiplexing</a>, the caller (user space) asks the kernel whether data is ready. What if we flip it, and let the kernel signal the user space program instead?</p>
 <p>This is what signal-driven I/O looks like.</p>
 <p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/04-signal-driven-io/main.c">example</a>. Here, the important lines are:</p>
-<pre><code class="language-c">    // 1. Install a handler for SIGIO
-    struct sigaction sa = {0}; // set the sigaction struct to default 0s.
-    sa.sa_handler = on_sigio;  // call on_sigio when the signal arrives (callback)
-    sigemptyset(&amp;sa.sa_mask);  // don't block any other signals while in the handler.
-    sigaction(SIGIO, &amp;sa, NULL); // wire up SIGIO to the handler.
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="w">    </span><span class="c1">// 1. Install a handler for SIGIO</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sigaction</span><span class="w"> </span><span class="n">sa</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="mi">0</span><span class="p">};</span><span class="w"> </span><span class="c1">// set the sigaction struct to default 0s.</span>
+<span class="w">    </span><span class="n">sa</span><span class="p">.</span><span class="n">sa_handler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">on_sigio</span><span class="p">;</span><span class="w">  </span><span class="c1">// call on_sigio when the signal arrives (callback)</span>
+<span class="w">    </span><span class="n">sigemptyset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sa</span><span class="p">.</span><span class="n">sa_mask</span><span class="p">);</span><span class="w">  </span><span class="c1">// don&#39;t block any other signals while in the handler.</span>
+<span class="w">    </span><span class="n">sigaction</span><span class="p">(</span><span class="n">SIGIO</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">sa</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span><span class="w"> </span><span class="c1">// wire up SIGIO to the handler.</span>
 
-    // 2. Tell the kernel which process gets the signal
-    fcntl(STDIN_FILENO, F_SETOWN, getpid());
+<span class="w">    </span><span class="c1">// 2. Tell the kernel which process gets the signal</span>
+<span class="w">    </span><span class="n">fcntl</span><span class="p">(</span><span class="n">STDIN_FILENO</span><span class="p">,</span><span class="w"> </span><span class="n">F_SETOWN</span><span class="p">,</span><span class="w"> </span><span class="n">getpid</span><span class="p">());</span>
 
-    // 3. Turn on signal-driven mode (plus non-blocking, so draining can't hang)
-    int flags = fcntl(STDIN_FILENO, F_GETFL);
-    fcntl(STDIN_FILENO, F_SETFL, flags | O_ASYNC | O_NONBLOCK);
-</code></pre>
+<span class="w">    </span><span class="c1">// 3. Turn on signal-driven mode (plus non-blocking, so draining can&#39;t hang)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fcntl</span><span class="p">(</span><span class="n">STDIN_FILENO</span><span class="p">,</span><span class="w"> </span><span class="n">F_GETFL</span><span class="p">);</span>
+<span class="w">    </span><span class="n">fcntl</span><span class="p">(</span><span class="n">STDIN_FILENO</span><span class="p">,</span><span class="w"> </span><span class="n">F_SETFL</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">O_ASYNC</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">O_NONBLOCK</span><span class="p">);</span>
+</code></pre></div>
 <p>The remaining code does some "work" in a loop and, once the handler has flagged that data is ready, reads it into a buffer.</p>
-<pre><code class="language-sh"># compile
-gcc -O0 main.c -g -o main
-# inspect
-(sleep 3; echo hi) | strace -T -e trace=read,fcntl ./main
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code><span class="c1"># compile</span>
+gcc<span class="w"> </span>-O0<span class="w"> </span>main.c<span class="w"> </span>-g<span class="w"> </span>-o<span class="w"> </span>main
+<span class="c1"># inspect</span>
+<span class="o">(</span>sleep<span class="w"> </span><span class="m">3</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>hi<span class="o">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>strace<span class="w"> </span>-T<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>read,fcntl<span class="w"> </span>./main
 
-# read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000050&gt;
-# fcntl(0, F_SETOWN, 25191)               = 0 &lt;0.000099&gt;
-# fcntl(0, F_GETFL)                       = 0 (flags O_RDONLY) &lt;0.000150&gt;
-# fcntl(0, F_SETFL, O_RDONLY|O_NONBLOCK|FASYNC) = 0 &lt;0.000076&gt;
-## 3 seconds of work, no syscalls
-# --- SIGIO {si_signo=SIGIO, si_code=SI_KERNEL} ---
-# --- SIGIO {si_signo=SIGIO, si_code=SI_KERNEL} ---
-# read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;0.000345&gt;
-# got 3 bytes after 29 units of work: hi
-# read(0, &quot;&quot;, 4096)                       = 0 &lt;0.000152&gt;
-</code></pre>
+<span class="c1"># read(3, &quot;\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0\267\0\1\0\0\0\360\206\2\0\0\0\0\0&quot;..., 832) = 832 &lt;0.000050&gt;</span>
+<span class="c1"># fcntl(0, F_SETOWN, 25191)               = 0 &lt;0.000099&gt;</span>
+<span class="c1"># fcntl(0, F_GETFL)                       = 0 (flags O_RDONLY) &lt;0.000150&gt;</span>
+<span class="c1"># fcntl(0, F_SETFL, O_RDONLY|O_NONBLOCK|FASYNC) = 0 &lt;0.000076&gt;</span>
+<span class="c1">## 3 seconds of work, no syscalls</span>
+<span class="c1"># --- SIGIO {si_signo=SIGIO, si_code=SI_KERNEL} ---</span>
+<span class="c1"># --- SIGIO {si_signo=SIGIO, si_code=SI_KERNEL} ---</span>
+<span class="c1"># read(0, &quot;hi\n&quot;, 4096)                   = 3 &lt;0.000345&gt;</span>
+<span class="c1"># got 3 bytes after 29 units of work: hi</span>
+<span class="c1"># read(0, &quot;&quot;, 4096)                       = 0 &lt;0.000152&gt;</span>
+</code></pre></div>
 <p>Compare this with <a href="#2-non-blocking-io">2. Non-blocking I/O</a>: the same 29 units of work, but no wall of <code>EAGAIN</code>s. The process makes no syscalls while it waits, and the kernel delivers a <code>SIGIO</code> when the pipe has data (and again when the writer closes it, hence the two signals).</p>
 <p>Sounds great, so why is it so rarely used? Signals are awkward to program with: the handler can interrupt your code at any point, you can only safely do a handful of things inside it, and a <code>SIGIO</code> doesn't tell you <em>which</em> FD is ready. With many FDs, you're back to checking each one.</p>
 <hr />
@@ -289,7 +289,7 @@ gcc -O0 main.c -g -o main
 <p>System calls: <code>io_uring_setup()</code>, <code>io_uring_enter()</code> (usually via <code>liburing</code>).</p>
 <p>Since version 5.1 of the kernel, a newer asynchronous model for I/O is available: <code>io_uring</code>.</p>
 <p>The core idea relies on two ring buffers shared between user space and the kernel:</p>
-<pre><code class="language-txt"> user space                         kernel
+<div class="highlight"><pre><span></span><code> user space                         kernel
  ┌──────────────────────┐
  │ Submission Queue (SQ)│ ──────▶  picks up SQEs, does the I/O
  │  [sqe][sqe][sqe]...  │
@@ -298,49 +298,49 @@ gcc -O0 main.c -g -o main
  │ Completion Queue (CQ)│ ◀──────  writes a CQE when each op finishes
  │  [cqe][cqe]...       │
  └──────────────────────┘
-</code></pre>
+</code></pre></div>
 <p>User space adds a <strong>Submission Queue Entry (SQE)</strong> to the SQ, and is notified of its result through a <strong>Completion Queue Entry (CQE)</strong> in the CQ.</p>
 <p>An SQE reads like "read FD X into buffer Y, length N, offset Z". Adding one is not a syscall: the request is just written into the shared buffer. A CQE holds what the equivalent syscall would have returned (e.g. the number of bytes read).</p>
 <p>Let's look at an <a href="https://github.com/jfgrea27/lowlevel/blob/main/learnings/linux-io-models/05-asynchronous-io/main.c">example</a>. Here, the important lines are:</p>
-<pre><code class="language-c">#include &lt;liburing.h&gt; // the library used for io_uring.
+<div class="highlight"><span class="filename">C</span><pre><span></span><code><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;liburing.h&gt;</span><span class="c1"> // the library used for io_uring.</span>
 
-int ret = io_uring_queue_init(8, &amp;ring, 0); // set up the ring with 8 entries in the submission queue.
+<span class="kt">int</span><span class="w"> </span><span class="n">ret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">io_uring_queue_init</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">ring</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"> </span><span class="c1">// set up the ring with 8 entries in the submission queue.</span>
 
-// get a free entry in the submission queue so that we can fill in the request
-struct io_uring_sqe *sqe;
-sqe = io_uring_get_sqe(&amp;ring);
-// prepare the request - which fd, where to save it, what offset.
-io_uring_prep_read(sqe, file_fd, file_req.buf, sizeof file_req.buf, 0); // offset 0
-// attach our own pointer, which comes back in the CQE
-io_uring_sqe_set_data(sqe, &amp;file_req);
+<span class="c1">// get a free entry in the submission queue so that we can fill in the request</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">io_uring_sqe</span><span class="w"> </span><span class="o">*</span><span class="n">sqe</span><span class="p">;</span>
+<span class="n">sqe</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">io_uring_get_sqe</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ring</span><span class="p">);</span>
+<span class="c1">// prepare the request - which fd, where to save it, what offset.</span>
+<span class="n">io_uring_prep_read</span><span class="p">(</span><span class="n">sqe</span><span class="p">,</span><span class="w"> </span><span class="n">file_fd</span><span class="p">,</span><span class="w"> </span><span class="n">file_req</span><span class="p">.</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">file_req</span><span class="p">.</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"> </span><span class="c1">// offset 0</span>
+<span class="c1">// attach our own pointer, which comes back in the CQE</span>
+<span class="n">io_uring_sqe_set_data</span><span class="p">(</span><span class="n">sqe</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">file_req</span><span class="p">);</span>
 
-// we can queue multiple requests at once (up to the 8 entries from initialisation).
-// In the example, we queue one for stdin and one for a file.
+<span class="c1">// we can queue multiple requests at once (up to the 8 entries from initialisation).</span>
+<span class="c1">// In the example, we queue one for stdin and one for a file.</span>
 
-// submit everything in one go
-io_uring_submit(&amp;ring);
+<span class="c1">// submit everything in one go</span>
+<span class="n">io_uring_submit</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ring</span><span class="p">);</span>
 
-// do work, collect results as they arrive
-int done = 0;
-long work = 0;
-while (done &lt; 2) {
-    struct io_uring_cqe *cqe;
-    while (io_uring_peek_cqe(&amp;ring, &amp;cqe) == 0) {
-        // ...
+<span class="c1">// do work, collect results as they arrive</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">done</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="kt">long</span><span class="w"> </span><span class="n">work</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">done</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">io_uring_cqe</span><span class="w"> </span><span class="o">*</span><span class="n">cqe</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">io_uring_peek_cqe</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ring</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">cqe</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// ...</span>
 
-        printf(&quot;%s done after %ld units of work: %d bytes: %.*s\n&quot;,
-               r-&gt;name, work, cqe-&gt;res, cqe-&gt;res, r-&gt;buf);
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%s done after %ld units of work: %d bytes: %.*s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span>
+<span class="w">               </span><span class="n">r</span><span class="o">-&gt;</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">work</span><span class="p">,</span><span class="w"> </span><span class="n">cqe</span><span class="o">-&gt;</span><span class="n">res</span><span class="p">,</span><span class="w"> </span><span class="n">cqe</span><span class="o">-&gt;</span><span class="n">res</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="o">-&gt;</span><span class="n">buf</span><span class="p">);</span>
 
-        // ...
-        io_uring_cqe_seen(&amp;ring, cqe); // mark the completion as consumed
-        done++;
-    }
-    usleep(100000); // stand-in for real work
-}
-// tear down the ring.
-io_uring_queue_exit(&amp;ring);
-close(file_fd);
-</code></pre>
+<span class="w">        </span><span class="c1">// ...</span>
+<span class="w">        </span><span class="n">io_uring_cqe_seen</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ring</span><span class="p">,</span><span class="w"> </span><span class="n">cqe</span><span class="p">);</span><span class="w"> </span><span class="c1">// mark the completion as consumed</span>
+<span class="w">        </span><span class="n">done</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="n">usleep</span><span class="p">(</span><span class="mi">100000</span><span class="p">);</span><span class="w"> </span><span class="c1">// stand-in for real work</span>
+<span class="p">}</span>
+<span class="c1">// tear down the ring.</span>
+<span class="n">io_uring_queue_exit</span><span class="p">(</span><span class="o">&amp;</span><span class="n">ring</span><span class="p">);</span>
+<span class="n">close</span><span class="p">(</span><span class="n">file_fd</span><span class="p">);</span>
+</code></pre></div>
 <p>Here we:</p>
 <ol>
 <li>Prepare and submit multiple I/O requests to the SQ.</li>
@@ -348,26 +348,26 @@ close(file_fd);
 <li>Consume the results from the CQ.</li>
 </ol>
 <p>By default, the CQ has twice as many entries as the SQ (you'll see <code>cq_entries=16</code> below).</p>
-<pre><code class="language-sh"># add the liburing library if not there
-sudo apt install liburing-dev -y
-# compile
-gcc -O0 main.c -g -o main -luring
-# inspect
-(sleep 3; echo hi) | strace -T -e trace=io_uring_setup,io_uring_enter,mmap,read ./main
+<div class="highlight"><span class="filename">Bash</span><pre><span></span><code><span class="c1"># add the liburing library if not there</span>
+sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>liburing-dev<span class="w"> </span>-y
+<span class="c1"># compile</span>
+gcc<span class="w"> </span>-O0<span class="w"> </span>main.c<span class="w"> </span>-g<span class="w"> </span>-o<span class="w"> </span>main<span class="w"> </span>-luring
+<span class="c1"># inspect</span>
+<span class="o">(</span>sleep<span class="w"> </span><span class="m">3</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span>hi<span class="o">)</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>strace<span class="w"> </span>-T<span class="w"> </span>-e<span class="w"> </span><span class="nv">trace</span><span class="o">=</span>io_uring_setup,io_uring_enter,mmap,read<span class="w"> </span>./main
 
-# ...
-## setting up io_uring
-# io_uring_setup(8, {flags=0, sq_thread_cpu=0, sq_thread_idle=0, sq_entries=8, cq_entries=16, features=IORING_FEAT_SINGLE_MMAP|IORING_FEAT_NODROP|...}) = 3 &lt;0.000110&gt;
+<span class="c1"># ...</span>
+<span class="c1">## setting up io_uring</span>
+<span class="c1"># io_uring_setup(8, {flags=0, sq_thread_cpu=0, sq_thread_idle=0, sq_entries=8, cq_entries=16, features=IORING_FEAT_SINGLE_MMAP|IORING_FEAT_NODROP|...}) = 3 &lt;0.000110&gt;</span>
 
-## mapping the rings into shared memory
-# mmap(NULL, 352, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, 3, 0) = 0xfdfbb2347000 &lt;0.000046&gt;
-# mmap(NULL, 512, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, 3, 0x10000000) = 0xfdfbb2346000 &lt;0.000044&gt;
-## submit both requests in a single syscall
-# io_uring_enter(3, 2, 0, 0, NULL, 8)     = 2 &lt;0.000150&gt;
-# file done after 1 units of work: 6 bytes: foobar
-## 3 seconds of work, no syscalls
-# pipe done after 29 units of work: 3 bytes: hi
-</code></pre>
+<span class="c1">## mapping the rings into shared memory</span>
+<span class="c1"># mmap(NULL, 352, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, 3, 0) = 0xfdfbb2347000 &lt;0.000046&gt;</span>
+<span class="c1"># mmap(NULL, 512, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, 3, 0x10000000) = 0xfdfbb2346000 &lt;0.000044&gt;</span>
+<span class="c1">## submit both requests in a single syscall</span>
+<span class="c1"># io_uring_enter(3, 2, 0, 0, NULL, 8)     = 2 &lt;0.000150&gt;</span>
+<span class="c1"># file done after 1 units of work: 6 bytes: foobar</span>
+<span class="c1">## 3 seconds of work, no syscalls</span>
+<span class="c1"># pipe done after 29 units of work: 3 bytes: hi</span>
+</code></pre></div>
 <p>Notice what's missing: there is no <code>read()</code> on the pipe at all. A single <code>io_uring_enter</code> submits both requests, and then the results just... appear.</p>
 <p>How does this work without a syscall to fetch the data?</p>
 <p><code>io_uring</code> uses <code>mmap</code>, which creates a new mapping in the virtual address space of the process. Here, the two <code>mmap</code> calls on FD 3 (the ring) map the SQ and CQ into memory that <strong>both</strong> the process and the kernel can see. Once mapped, the process reads CQEs straight from memory, no syscall required.</p>
@@ -479,7 +479,7 @@ gcc -O0 main.c -g -o main -luring
 <p><code>strace</code> made the difference visible every time: the 3-second wait moved from a blocking <code>read(0, ...) &lt;2.99&gt;</code>, to a stream of <code>EAGAIN</code> retries, to a single <code>ppoll</code>, to a <code>SIGIO</code>, and finally to no <code>read()</code> at all.</p>
 <p>Python's <code>asyncio</code>, Go's goroutines, Tokio and Node all wrap model 3 (<code>epoll</code>) plus a thread pool for files, and <code>io_uring</code> stays an opt-in for disk-heavy software like databases. Knowing what sits underneath still pays off: when something hangs, spins at 100% CPU, or just seems slow, <code>strace -T</code> will usually show you which of these five models you're really running.</p>
 <hr>
-<p><a href="/posts/06-ml-math/">Maths behind ML and AI</a> &rarr;</p>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/09-anti-patterns/">09 - What not to do</a> | <a href="/posts/06-ml-math/">Maths behind ML and AI</a> &rarr;</p>
 </main>
 <hr>
 <footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>

@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 - What not to do</title>
+<link rel="icon" href="/favicon/favicon.ico">
+<link rel="stylesheet" href="/style.css?v=5">
+
+</head>
+<body>
+<nav><a href="/">home</a> | <a href="/posts/">posts</a> | <a href="/til/">til</a> | <a href="/journey/">journey</a> | <a href="/about/">about</a></nav>
+<hr>
+<main>
+<p><a href="/posts/08-dynamodb-patterns/">&larr; DynamoDB patterns</a></p>
+<h1>09 - What not to do</h1>
+<p><small>2026-10-20</small></p>
+<p>We finish the series by turning everything around. Most DynamoDB pain comes from a short list of mistakes, and each one has a symptom we can spot and a pattern from earlier in the series that fixes it. This page measures what each mistake actually costs, using <code>ReturnConsumedCapacity</code> and request counts, so it doubles as a review checklist for an existing table.</p>
+<table>
+<thead>
+<tr>
+<th>Anti-pattern</th>
+<th>Symptom</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="#1-relational-modelling-one-table-per-entity-joins-in-code">One table per entity, joined in the app</a></td>
+<td>Several round trips per page</td>
+<td><a href="../02-modelling/#04--single-table-design">04 · Single-table design</a></td>
+</tr>
+<tr>
+<td><a href="#2-unbounded-lists-or-maps-inside-one-item">Unbounded list inside an item</a></td>
+<td>Write cost grows on every append, then the write fails at 400 KB</td>
+<td><a href="../04-item-size/#17--keep-items-small-use-item-collections">17 · Keep items small</a></td>
+</tr>
+<tr>
+<td><a href="#3-low-cardinality-partition-key">Low-cardinality partition key</a></td>
+<td>Throttling on one hot key while the rest of the table is idle</td>
+<td><a href="../07-performance-and-scale/#34--high-cardinality-partition-keys">34 · High-cardinality keys</a>, <a href="../07-performance-and-scale/#35--write-sharding">35 · Write sharding</a></td>
+</tr>
+<tr>
+<td><a href="#4-scan--filterexpression-instead-of-a-key-query">Scan + filter in a request path</a></td>
+<td>Read cost proportional to table size</td>
+<td><a href="../03-querying/#12--avoid-scan-use-parallel-scan-for-batch-jobs">12 · Avoid Scan</a>, <a href="../02-modelling/#10--sparse-index">10 · Sparse index</a></td>
+</tr>
+<tr>
+<td><a href="#5-too-many-gsis">Too many GSIs</a></td>
+<td>Every write costs one extra write per index</td>
+<td><a href="../02-modelling/#09--gsi-overloading">09 · GSI overloading</a></td>
+</tr>
+<tr>
+<td><a href="#6-ad-hoc-analytics-on-the-live-table">Ad-hoc analytics on the live table</a></td>
+<td>Reporting jobs eat capacity and throttle the app</td>
+<td><a href="../08-operations/#41--analytics-outside-dynamodb">41 · Analytics outside DynamoDB</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="42--anti-patterns">42 · Anti-patterns</h2>
+<p><strong>Code:</strong> <a href="https://github.com/jfgrea27/dynamodb-patterns/blob/main/patterns/09-anti-patterns/42-anti-patterns/42-anti-patterns.py">42-anti-patterns.py</a> · run with <code>just run 42</code></p>
+<p>The script builds a small table for each mistake and measures it. All the numbers below come from a run against DynamoDB Local. For each anti-pattern we look at the smell (how to recognise it), the cost (what the script measured) and the fix.</p>
+<h3 id="1-relational-modelling-one-table-per-entity-joins-in-code">1. Relational modelling (one table per entity, joins in code)</h3>
+<p><strong>Smell:</strong> <code>users</code>, <code>orders</code> and <code>addresses</code> tables, with the app fetching a user and then looping over order IDs.</p>
+<p><strong>Cost:</strong> N+1 requests. The script stores a user with three order IDs in a <code>users</code> table, and the orders in an <code>orders</code> table. It then loads the same data from a single table where the user and their orders share a partition key:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">user</span> <span class="o">=</span> <span class="n">users</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;userId&quot;</span><span class="p">:</span> <span class="s2">&quot;u1&quot;</span><span class="p">})[</span><span class="s2">&quot;Item&quot;</span><span class="p">]</span>
+<span class="k">for</span> <span class="n">oid</span> <span class="ow">in</span> <span class="n">user</span><span class="p">[</span><span class="s2">&quot;orderIds&quot;</span><span class="p">]:</span>
+    <span class="n">orders</span><span class="o">.</span><span class="n">get_item</span><span class="p">(</span><span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;orderId&quot;</span><span class="p">:</span> <span class="n">oid</span><span class="p">})</span>
+    <span class="n">requests</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="n">single</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;USER#u1&quot;</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; GetItem p42-users
+    key:        {userId: &#39;u1&#39;}
+
+&gt;&gt;&gt; GetItem p42-orders
+    key:        {orderId: &#39;o1&#39;}
+
+&gt;&gt;&gt; GetItem p42-orders
+    key:        {orderId: &#39;o2&#39;}
+    ... (+1 more GetItem calls not shown)
+
+&gt;&gt;&gt; Query p42-single
+    key:        PK = &#39;USER#u1&#39;
+
+=== 1. Relational modeling: requests to load a user + orders ===
+{
+  &quot;table-per-entity&quot;: 4,
+  &quot;single-table&quot;: 1
+}
+</code></pre></div>
+<p>Loading a user with 3 orders took <strong>4 requests vs 1</strong>, and latency grows with N.</p>
+<p><strong>Fix:</strong> put items that are read together in one item collection (<a href="../02-modelling/#04--single-table-design">04</a>, <a href="../02-modelling/#11--denormalization-and-duplication">11</a>), and design from the access patterns (<a href="../02-modelling/#02--access-pattern-first-design">02</a>).</p>
+<h3 id="2-unbounded-lists-or-maps-inside-one-item">2. Unbounded lists or maps inside one item</h3>
+<p><strong>Smell:</strong> <code>comments: [...]</code>, <code>events: [...]</code> or <code>followers: {...}</code> that grow forever.</p>
+<p><strong>Cost:</strong> every update rewrites the <strong>whole</strong> item. The script appends 10 KB messages to a <code>messages</code> list on a single chat item until something breaks:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">resp</span> <span class="o">=</span> <span class="n">t</span><span class="o">.</span><span class="n">update_item</span><span class="p">(</span>
+    <span class="n">Key</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;PK&quot;</span><span class="p">:</span> <span class="s2">&quot;CHAT#c1&quot;</span><span class="p">,</span> <span class="s2">&quot;SK&quot;</span><span class="p">:</span> <span class="s2">&quot;META&quot;</span><span class="p">},</span>
+    <span class="n">UpdateExpression</span><span class="o">=</span><span class="s2">&quot;SET messages = list_append(messages, :m)&quot;</span><span class="p">,</span>
+    <span class="n">ExpressionAttributeValues</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;:m&quot;</span><span class="p">:</span> <span class="p">[</span><span class="sa">f</span><span class="s2">&quot;message </span><span class="si">{</span><span class="n">i</span><span class="si">}</span><span class="s2"> &quot;</span> <span class="o">+</span> <span class="s2">&quot;x&quot;</span> <span class="o">*</span> <span class="mi">10_000</span><span class="p">]},</span>
+    <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; UpdateItem p42-unbounded
+    key:        {PK: &#39;CHAT#c1&#39;, SK: &#39;META&#39;}
+    update:     SET messages = list_append(messages, [&#39;message 0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...&#39;])
+    ... (+38 more UpdateItem calls not shown)
+
+=== 2. Unbounded list ===
+{
+  &quot;appends before failure&quot;: 40,
+  &quot;WCU of 1st / last append&quot;: [
+    10.0,
+    392.0
+  ],
+  &quot;error&quot;: &quot;Item size to update has exceeded the maximum allowed size&quot;,
+  &quot;fix&quot;: &quot;one item per message: PK=CHAT#c1, SK=MSG#&lt;ulid&gt; (patterns 17, 06)&quot;
+}
+</code></pre></div>
+<p>The first append cost 10 WCU, which is just the new 10 KB. By the 40th append, the same-sized message cost <strong>392 WCU</strong>, because we were paying to rewrite every message before it. The next append failed outright, because the item had reached the 400 KB limit.</p>
+<p><strong>Fix:</strong> one item per child (<code>PK=CHAT#c1, SK=MSG#&lt;ulid&gt;</code>), and query the collection (<a href="../04-item-size/#17--keep-items-small-use-item-collections">17</a>, <a href="../02-modelling/#06--sortable-ids-latest-first">06</a>). For big blobs, see <a href="../04-item-size/#20--offload-large-items-to-s3">20</a> and <a href="../04-item-size/#21--chunking">21</a>.</p>
+<h3 id="3-low-cardinality-partition-key">3. Low-cardinality partition key</h3>
+<p><strong>Smell:</strong> <code>PK = status</code>, <code>PK = date</code>, <code>PK = tenant</code> when one tenant is huge, or <code>PK = "ALL"</code>.</p>
+<p><strong>Cost:</strong> traffic piles onto a few keys. The script writes 1,000 orders keyed by status, with 90% of them <code>PENDING</code>:</p>
+<div class="highlight"><pre><span></span><code>=== 3. Low-cardinality PK (PK=status): items per partition key ===
+{
+  &quot;PENDING&quot;: 900,
+  &quot;SHIPPED&quot;: 90,
+  &quot;CANCELLED&quot;: 10,
+  &quot;note&quot;: &quot;90% of reads/writes hit one key -&gt; ~1,000 WCU/s cap. Use PK=ORDER#id + sparse GSI (10) or sharding (35)&quot;
+}
+</code></pre></div>
+<p>DynamoDB Local doesn't throttle, so the script can only show the distribution. In AWS, 90% of the load would hit one partition key, which is capped at about 1,000 WCU / 3,000 RCU per second. Throttling follows, however much capacity the table has.</p>
+<p><strong>Fix:</strong> a high-cardinality PK such as <code>ORDER#id</code> (<a href="../07-performance-and-scale/#34--high-cardinality-partition-keys">34</a>). Serve "orders by status" from a sparse GSI (<a href="../02-modelling/#10--sparse-index">10</a>), and shard keys that are hot by nature (<a href="../07-performance-and-scale/#35--write-sharding">35</a>).</p>
+<h3 id="4-scan--filterexpression-instead-of-a-key-query">4. Scan + FilterExpression instead of a key query</h3>
+<p><strong>Smell:</strong> <code>table.scan(FilterExpression=Attr("customer").eq(x))</code> on a request path.</p>
+<p><strong>Cost:</strong> we pay for every item <strong>read</strong>, not every item returned. The script stores 1,000 orders across 100 customers, then finds customer <code>C7</code>'s orders twice: once with a filtered Scan, and once with a Query on a GSI keyed by customer:</p>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="n">kwargs</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">FilterExpression</span><span class="o">=</span><span class="n">Attr</span><span class="p">(</span><span class="s2">&quot;customer&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;C7&quot;</span><span class="p">),</span> <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">)</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">t</span><span class="o">.</span><span class="n">scan</span><span class="p">(</span><span class="o">**</span><span class="n">kwargs</span><span class="p">)</span>  <span class="c1"># looped over every page</span>
+
+<span class="n">q</span> <span class="o">=</span> <span class="n">t</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">IndexName</span><span class="o">=</span><span class="s2">&quot;GSI1&quot;</span><span class="p">,</span> <span class="n">KeyConditionExpression</span><span class="o">=</span><span class="n">Key</span><span class="p">(</span><span class="s2">&quot;GSI1PK&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">eq</span><span class="p">(</span><span class="s2">&quot;C7&quot;</span><span class="p">),</span> <span class="n">ReturnConsumedCapacity</span><span class="o">=</span><span class="s2">&quot;TOTAL&quot;</span><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; Scan p42-scan-filter
+    filter:     customer = &#39;C7&#39;
+
+&gt;&gt;&gt; Query p42-scan-filter
+    key:        GSI1PK = &#39;C7&#39;
+    IndexName:  GSI1
+
+=== 4. Scan+filter vs Query on a GSI (find one customer&#39;s orders) ===
+{
+  &quot;scan&quot;: {
+    &quot;scanned&quot;: 1000,
+    &quot;returned&quot;: 10,
+    &quot;RCU&quot;: 68.0
+  },
+  &quot;query&quot;: {
+    &quot;scanned&quot;: 10,
+    &quot;returned&quot;: 10,
+    &quot;RCU&quot;: 1.0
+  }
+}
+</code></pre></div>
+<p>Both return the same 10 orders. The Scan read all 1,000 items to find them and cost <strong>68 RCU</strong>. The GSI Query read only the 10 it needed and cost <strong>1 RCU</strong>. The scan also gets worse as the table grows, while the query doesn't.</p>
+<p><strong>Fix:</strong> add a key or GSI for the access pattern (<a href="../02-modelling/#09--gsi-overloading">09</a>, <a href="../02-modelling/#07--inverted-index">07</a>). See also <a href="../03-querying/#12--avoid-scan-use-parallel-scan-for-batch-jobs">12</a> and <a href="../03-querying/#13--filter-expressions-dont-reduce-cost">13</a>.</p>
+<h3 id="5-too-many-gsis">5. Too many GSIs</h3>
+<p><strong>Smell:</strong> one GSI per attribute "just in case", up to the limit of 20.</p>
+<p><strong>Cost:</strong> every write is repeated into each index that projects the item. The script puts the same ~1 KB item into tables with 0, 2 and 5 GSIs, and reads the write cost back with <code>ReturnConsumedCapacity="INDEXES"</code>:</p>
+<div class="highlight"><pre><span></span><code>&gt;&gt;&gt; PutItem p42-gsis-0
+    item:       {PK: &#39;X&#39;, SK: &#39;Y&#39;, pad: &#39;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...&#39;}
+
+&gt;&gt;&gt; PutItem p42-gsis-2
+    item:       {PK: &#39;X&#39;, SK: &#39;Y&#39;, pad: &#39;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...&#39;, GSI0PK: &#39;a&#39;, GSI0SK: &#39;b&#39;, GSI1PK: &#39;a&#39;, GSI1SK: &#39;b&#39;}
+
+&gt;&gt;&gt; PutItem p42-gsis-5
+    item:       {PK: &#39;X&#39;, SK: &#39;Y&#39;, pad: &#39;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...&#39;, GSI0PK: &#39;a&#39;, GSI0SK: &#39;b&#39;, GSI1PK: &#39;a&#39;, GSI1SK: &#39;b&#39;, GSI2PK: &#39;a&#39;, GSI2SK: &#39;b&#39;, GSI3PK: &#39;a&#39;, GSI3SK: &#39;b&#39;, GSI4PK: &#39;a&#39;, GSI4SK: &#39;b&#39;}
+
+=== 5. WCU for one ~1 KB put ===
+{
+  &quot;0 GSIs&quot;: 1.0,
+  &quot;2 GSIs&quot;: 3.0,
+  &quot;5 GSIs&quot;: 6.0
+}
+</code></pre></div>
+<p>One put cost <strong>1 WCU with 0 GSIs, 3 with 2, and 6 with 5</strong>: one write for the table, plus one per index. In provisioned mode, an under-provisioned GSI also throttles writes to the base table.</p>
+<p><strong>Fix:</strong> overload a few generic GSIs (<code>GSI1PK</code>/<code>GSI1SK</code>) to serve many patterns (<a href="../02-modelling/#09--gsi-overloading">09</a>), keep them sparse (<a href="../02-modelling/#10--sparse-index">10</a>), and project only what we need (<a href="../03-querying/#15--gsi-projections">15</a>).</p>
+<h3 id="6-ad-hoc-analytics-on-the-live-table">6. Ad-hoc analytics on the live table</h3>
+<p><strong>Smell:</strong> reporting queries, dashboards or "export everything" jobs scanning production tables.</p>
+<p><strong>Cost:</strong> a full scan every time (see #4), competing with user traffic for capacity. And even then, there's no GROUP BY, JOIN or ORDER BY on non-key attributes. The script doesn't measure this one; it's #4 at a larger scale:</p>
+<div class="highlight"><pre><span></span><code>=== 6. Ad-hoc analytics on DynamoDB ===
+&quot;GROUP BY / joins / &#39;top N by X&#39; need a full scan every time (see #4) and steal capacity from live traffic. Export to S3 + Athena, or zero-ETL to Redshift instead (pattern 41).&quot;
+</code></pre></div>
+<p><strong>Fix:</strong> export to S3 + Athena, zero-ETL to Redshift or OpenSearch, or stream changes to a data lake (<a href="../08-operations/#41--analytics-outside-dynamodb">41</a>, <a href="../06-lifecycle-and-events/#31--dynamodb-streams--cdc">31</a>).</p>
+<h3 id="also-watch-for">Also watch for</h3>
+<p>A few smaller mistakes don't get their own measurement, but come up just as often:</p>
+<ul>
+<li><strong>Not handling <code>UnprocessedItems</code></strong> in batch calls, which silently loses writes (<a href="../03-querying/#16--batch-operations-with-retries">16</a>).</li>
+<li><strong>Reading a GSI right after writing</strong> and expecting to see the write (<a href="../05-consistency/#28--gsis-are-eventually-consistent">28</a>).</li>
+<li><strong>Offset pagination</strong> ("page 7"). DynamoDB only has cursors (<a href="../03-querying/#14--pagination-with-cursors">14</a>).</li>
+<li><strong>Read-modify-write without conditions</strong>, which causes lost updates (<a href="../05-consistency/#23--optimistic-locking">23</a>, <a href="../05-consistency/#22--conditional-writes">22</a>).</li>
+<li><strong>Random UUIDs as sort keys</strong> when we need time order (<a href="../02-modelling/#06--sortable-ids-latest-first">06</a>).</li>
+</ul>
+<p>That's the end of the series. If you've read this far, the best next step is to clone the <a href="https://github.com/jfgrea27/dynamodb-patterns">repo</a>, run <code>just up</code>, and break things for yourself. Or go back to the <a href="../01-intro-and-setup/">start</a> and pick the patterns that match the problem in front of you.</p>
+<hr>
+<p>&larr; <a href="/posts/08-dynamodb-patterns/08-operations/">08 - Operations</a> | <a href="/posts/07-linux-io-models/">Linux I/O models</a> &rarr;</p>
+</main>
+<hr>
+<footer><a href="https://github.com/jfgrea27">github</a> | <a href="https://www.linkedin.com/in/james-rea/">linkedin</a> | <a href="https://www.buymeacoffee.com/jfgrea27">buy me a coffee</a></footer>
+</body>
+</html>

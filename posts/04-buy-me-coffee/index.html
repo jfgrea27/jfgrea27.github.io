@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>So You Want To Buy Me Coffee?</title>
 <link rel="icon" href="/favicon/favicon.ico">
-<link rel="stylesheet" href="/style.css?v=3">
+<link rel="stylesheet" href="/style.css?v=5">
 <script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs"; mermaid.initialize({startOnLoad: true});</script>
 </head>
 <body>
@@ -51,29 +51,29 @@ flowchart LR
 
 <h3 id="the-code">The Code</h3>
 <p>The API handler was dead simple - accept an order, write to the database, return success:</p>
-<pre><code class="language-python">async def create_order_v1(order: OrderCreate, db: Session):
-    db_order = Order(**order.dict())
-    db.add(db_order)
-    db.commit()  # Blocks until write completes
-    return {&quot;status&quot;: &quot;ok&quot;, &quot;order_id&quot;: db_order.id}
-</code></pre>
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">async</span> <span class="k">def</span> <span class="nf">create_order_v1</span><span class="p">(</span><span class="n">order</span><span class="p">:</span> <span class="n">OrderCreate</span><span class="p">,</span> <span class="n">db</span><span class="p">:</span> <span class="n">Session</span><span class="p">):</span>
+    <span class="n">db_order</span> <span class="o">=</span> <span class="n">Order</span><span class="p">(</span><span class="o">**</span><span class="n">order</span><span class="o">.</span><span class="n">dict</span><span class="p">())</span>
+    <span class="n">db</span><span class="o">.</span><span class="n">add</span><span class="p">(</span><span class="n">db_order</span><span class="p">)</span>
+    <span class="n">db</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>  <span class="c1"># Blocks until write completes</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;ok&quot;</span><span class="p">,</span> <span class="s2">&quot;order_id&quot;</span><span class="p">:</span> <span class="n">db_order</span><span class="o">.</span><span class="n">id</span><span class="p">}</span>
+</code></pre></div>
 <p>The aggregator cron job ran every minute:</p>
-<pre><code class="language-python">def aggregate_metrics():
-    # Query last hour of orders
-    orders = db.query(Order).filter(
-        Order.timestamp &gt; datetime.now() - timedelta(hours=1)
-    ).all()
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">def</span> <span class="nf">aggregate_metrics</span><span class="p">():</span>
+    <span class="c1"># Query last hour of orders</span>
+    <span class="n">orders</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">query</span><span class="p">(</span><span class="n">Order</span><span class="p">)</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span>
+        <span class="n">Order</span><span class="o">.</span><span class="n">timestamp</span> <span class="o">&gt;</span> <span class="n">datetime</span><span class="o">.</span><span class="n">now</span><span class="p">()</span> <span class="o">-</span> <span class="n">timedelta</span><span class="p">(</span><span class="n">hours</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="p">)</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
 
-    # Compute metrics
-    metrics = {
-        &quot;hourly_count&quot;: len(orders),
-        &quot;hourly_revenue&quot;: sum(o.price for o in orders),
-        &quot;top_drinks&quot;: get_top_drinks(orders)
-    }
+    <span class="c1"># Compute metrics</span>
+    <span class="n">metrics</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">&quot;hourly_count&quot;</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">orders</span><span class="p">),</span>
+        <span class="s2">&quot;hourly_revenue&quot;</span><span class="p">:</span> <span class="nb">sum</span><span class="p">(</span><span class="n">o</span><span class="o">.</span><span class="n">price</span> <span class="k">for</span> <span class="n">o</span> <span class="ow">in</span> <span class="n">orders</span><span class="p">),</span>
+        <span class="s2">&quot;top_drinks&quot;</span><span class="p">:</span> <span class="n">get_top_drinks</span><span class="p">(</span><span class="n">orders</span><span class="p">)</span>
+    <span class="p">}</span>
 
-    # Cache in Redis
-    redis.set(&quot;metrics:hourly&quot;, json.dumps(metrics))
-</code></pre>
+    <span class="c1"># Cache in Redis</span>
+    <span class="n">redis</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="s2">&quot;metrics:hourly&quot;</span><span class="p">,</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">metrics</span><span class="p">))</span>
+</code></pre></div>
 <h3 id="the-good">The Good</h3>
 <ul>
 <li><strong>Simple to understand</strong> - Anyone could debug it</li>
@@ -132,46 +132,46 @@ flowchart LR
 <li><strong>Acknowledgments</strong> - Only remove messages after successful processing</li>
 </ol>
 <p>The API became blazing fast:</p>
-<pre><code class="language-python">async def create_order_v2(order: OrderCreate, redis: Redis):
-    message_id = str(uuid.uuid4())  # For deduplication
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">async</span> <span class="k">def</span> <span class="nf">create_order_v2</span><span class="p">(</span><span class="n">order</span><span class="p">:</span> <span class="n">OrderCreate</span><span class="p">,</span> <span class="n">redis</span><span class="p">:</span> <span class="n">Redis</span><span class="p">):</span>
+    <span class="n">message_id</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">())</span>  <span class="c1"># For deduplication</span>
 
-    await redis.xadd(&quot;orders&quot;, {
-        &quot;message_id&quot;: message_id,
-        &quot;drink&quot;: order.drink,
-        &quot;store&quot;: order.store,
-        &quot;price&quot;: str(order.price),
-        &quot;version&quot;: &quot;v2&quot;
-    })
+    <span class="k">await</span> <span class="n">redis</span><span class="o">.</span><span class="n">xadd</span><span class="p">(</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span> <span class="p">{</span>
+        <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="n">message_id</span><span class="p">,</span>
+        <span class="s2">&quot;drink&quot;</span><span class="p">:</span> <span class="n">order</span><span class="o">.</span><span class="n">drink</span><span class="p">,</span>
+        <span class="s2">&quot;store&quot;</span><span class="p">:</span> <span class="n">order</span><span class="o">.</span><span class="n">store</span><span class="p">,</span>
+        <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">order</span><span class="o">.</span><span class="n">price</span><span class="p">),</span>
+        <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="s2">&quot;v2&quot;</span>
+    <span class="p">})</span>
 
-    return {&quot;status&quot;: &quot;queued&quot;, &quot;message_id&quot;: message_id}
-    # Returns in ~3ms instead of ~15ms!
-</code></pre>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;queued&quot;</span><span class="p">,</span> <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="n">message_id</span><span class="p">}</span>
+    <span class="c1"># Returns in ~3ms instead of ~15ms!</span>
+</code></pre></div>
 <p>The stream worker processed orders in batches:</p>
-<pre><code class="language-python">async def process_orders():
-    while True:
-        # Read up to 100 orders, or timeout after 2 seconds
-        messages = await redis.xreadgroup(
-            &quot;workers&quot;, &quot;worker-1&quot;, {&quot;orders&quot;: &quot;&gt;&quot;},
-            count=100, block=2000
-        )
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">async</span> <span class="k">def</span> <span class="nf">process_orders</span><span class="p">():</span>
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="c1"># Read up to 100 orders, or timeout after 2 seconds</span>
+        <span class="n">messages</span> <span class="o">=</span> <span class="k">await</span> <span class="n">redis</span><span class="o">.</span><span class="n">xreadgroup</span><span class="p">(</span>
+            <span class="s2">&quot;workers&quot;</span><span class="p">,</span> <span class="s2">&quot;worker-1&quot;</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;orders&quot;</span><span class="p">:</span> <span class="s2">&quot;&gt;&quot;</span><span class="p">},</span>
+            <span class="n">count</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">block</span><span class="o">=</span><span class="mi">2000</span>
+        <span class="p">)</span>
 
-        if messages:
-            # Batch insert to PostgreSQL
-            orders = [parse_order(m) for m in messages]
-            await batch_insert(orders)
+        <span class="k">if</span> <span class="n">messages</span><span class="p">:</span>
+            <span class="c1"># Batch insert to PostgreSQL</span>
+            <span class="n">orders</span> <span class="o">=</span> <span class="p">[</span><span class="n">parse_order</span><span class="p">(</span><span class="n">m</span><span class="p">)</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">]</span>
+            <span class="k">await</span> <span class="n">batch_insert</span><span class="p">(</span><span class="n">orders</span><span class="p">)</span>
 
-            # Update metrics in real-time
-            await update_metrics(orders)
+            <span class="c1"># Update metrics in real-time</span>
+            <span class="k">await</span> <span class="n">update_metrics</span><span class="p">(</span><span class="n">orders</span><span class="p">)</span>
 
-            # Acknowledge processed messages
-            await redis.xack(&quot;orders&quot;, &quot;workers&quot;, *[m.id for m in messages])
-</code></pre>
+            <span class="c1"># Acknowledge processed messages</span>
+            <span class="k">await</span> <span class="n">redis</span><span class="o">.</span><span class="n">xack</span><span class="p">(</span><span class="s2">&quot;orders&quot;</span><span class="p">,</span> <span class="s2">&quot;workers&quot;</span><span class="p">,</span> <span class="o">*</span><span class="p">[</span><span class="n">m</span><span class="o">.</span><span class="n">id</span> <span class="k">for</span> <span class="n">m</span> <span class="ow">in</span> <span class="n">messages</span><span class="p">])</span>
+</code></pre></div>
 <h3 id="handling-duplicates">Handling Duplicates</h3>
 <p>Joe added a <code>message_id</code> column to handle potential duplicates (at-least-once delivery):</p>
-<pre><code class="language-sql">INSERT INTO orders (message_id, drink, store, price, timestamp)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (message_id) DO NOTHING;
-</code></pre>
+<div class="highlight"><span class="filename">SQL</span><pre><span></span><code><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="p">(</span><span class="n">message_id</span><span class="p">,</span><span class="w"> </span><span class="n">drink</span><span class="p">,</span><span class="w"> </span><span class="n">store</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="k">timestamp</span><span class="p">)</span>
+<span class="k">VALUES</span><span class="w"> </span><span class="p">(</span><span class="err">$</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="err">$</span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="err">$</span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="err">$</span><span class="mi">5</span><span class="p">)</span>
+<span class="k">ON</span><span class="w"> </span><span class="n">CONFLICT</span><span class="w"> </span><span class="p">(</span><span class="n">message_id</span><span class="p">)</span><span class="w"> </span><span class="k">DO</span><span class="w"> </span><span class="k">NOTHING</span><span class="p">;</span>
+</code></pre></div>
 <h3 id="the-results">The Results</h3>
 <table>
 <thead>
@@ -267,23 +267,23 @@ flowchart TB
 <li><strong>Replication</strong> - Data replicated across brokers for fault tolerance</li>
 <li><strong>Replay</strong> - Can reprocess historical data from any point</li>
 </ol>
-<pre><code class="language-python">async def create_order_v3(order: OrderCreate, producer: AIOKafkaProducer):
-    message_id = str(uuid.uuid4())
+<div class="highlight"><span class="filename">Python</span><pre><span></span><code><span class="k">async</span> <span class="k">def</span> <span class="nf">create_order_v3</span><span class="p">(</span><span class="n">order</span><span class="p">:</span> <span class="n">OrderCreate</span><span class="p">,</span> <span class="n">producer</span><span class="p">:</span> <span class="n">AIOKafkaProducer</span><span class="p">):</span>
+    <span class="n">message_id</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">uuid</span><span class="o">.</span><span class="n">uuid4</span><span class="p">())</span>
 
-    await producer.send_and_wait(
-        &quot;orders&quot;,
-        key=order.store.encode(),  # Partition by store
-        value=json.dumps({
-            &quot;message_id&quot;: message_id,
-            &quot;drink&quot;: order.drink,
-            &quot;store&quot;: order.store,
-            &quot;price&quot;: float(order.price),
-            &quot;version&quot;: &quot;v3&quot;
-        }).encode()
-    )
+    <span class="k">await</span> <span class="n">producer</span><span class="o">.</span><span class="n">send_and_wait</span><span class="p">(</span>
+        <span class="s2">&quot;orders&quot;</span><span class="p">,</span>
+        <span class="n">key</span><span class="o">=</span><span class="n">order</span><span class="o">.</span><span class="n">store</span><span class="o">.</span><span class="n">encode</span><span class="p">(),</span>  <span class="c1"># Partition by store</span>
+        <span class="n">value</span><span class="o">=</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">({</span>
+            <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="n">message_id</span><span class="p">,</span>
+            <span class="s2">&quot;drink&quot;</span><span class="p">:</span> <span class="n">order</span><span class="o">.</span><span class="n">drink</span><span class="p">,</span>
+            <span class="s2">&quot;store&quot;</span><span class="p">:</span> <span class="n">order</span><span class="o">.</span><span class="n">store</span><span class="p">,</span>
+            <span class="s2">&quot;price&quot;</span><span class="p">:</span> <span class="nb">float</span><span class="p">(</span><span class="n">order</span><span class="o">.</span><span class="n">price</span><span class="p">),</span>
+            <span class="s2">&quot;version&quot;</span><span class="p">:</span> <span class="s2">&quot;v3&quot;</span>
+        <span class="p">})</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+    <span class="p">)</span>
 
-    return {&quot;status&quot;: &quot;queued&quot;, &quot;message_id&quot;: message_id}
-</code></pre>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;queued&quot;</span><span class="p">,</span> <span class="s2">&quot;message_id&quot;</span><span class="p">:</span> <span class="n">message_id</span><span class="p">}</span>
+</code></pre></div>
 <h3 id="why-flink">Why Flink?</h3>
 <p>Flink is a distributed stream processing engine that handles:</p>
 <ol>
@@ -293,20 +293,20 @@ flowchart TB
 <li><strong>Stateful Processing</strong> - Maintain state across events (running totals, etc.)</li>
 </ol>
 <p>The Flink job (simplified):</p>
-<pre><code class="language-java">DataStream&lt;CoffeeOrder&gt; orders = env
-    .addSource(new FlinkKafkaConsumer&lt;&gt;(&quot;orders&quot;, ...))
-    .filter(order -&gt; order.getVersion().equals(&quot;v3&quot;));
+<div class="highlight"><span class="filename">Java</span><pre><span></span><code><span class="n">DataStream</span><span class="o">&lt;</span><span class="n">CoffeeOrder</span><span class="o">&gt;</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">env</span>
+<span class="w">    </span><span class="p">.</span><span class="na">addSource</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">FlinkKafkaConsumer</span><span class="o">&lt;&gt;</span><span class="p">(</span><span class="s">&quot;orders&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">...))</span>
+<span class="w">    </span><span class="p">.</span><span class="na">filter</span><span class="p">(</span><span class="n">order</span><span class="w"> </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">order</span><span class="p">.</span><span class="na">getVersion</span><span class="p">().</span><span class="na">equals</span><span class="p">(</span><span class="s">&quot;v3&quot;</span><span class="p">));</span>
 
-// Sink 1: Write to PostgreSQL with deduplication
-orders.addSink(new PostgresSink());
+<span class="c1">// Sink 1: Write to PostgreSQL with deduplication</span>
+<span class="n">orders</span><span class="p">.</span><span class="na">addSink</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">PostgresSink</span><span class="p">());</span>
 
-// Sink 2: Aggregate metrics per store in 1-second windows
-orders
-    .keyBy(CoffeeOrder::getStore)
-    .window(TumblingProcessingTimeWindows.of(Time.seconds(1)))
-    .aggregate(new MetricsAggregator())
-    .addSink(new RedisMetricsSink());
-</code></pre>
+<span class="c1">// Sink 2: Aggregate metrics per store in 1-second windows</span>
+<span class="n">orders</span>
+<span class="w">    </span><span class="p">.</span><span class="na">keyBy</span><span class="p">(</span><span class="n">CoffeeOrder</span><span class="p">::</span><span class="n">getStore</span><span class="p">)</span>
+<span class="w">    </span><span class="p">.</span><span class="na">window</span><span class="p">(</span><span class="n">TumblingProcessingTimeWindows</span><span class="p">.</span><span class="na">of</span><span class="p">(</span><span class="n">Time</span><span class="p">.</span><span class="na">seconds</span><span class="p">(</span><span class="mi">1</span><span class="p">)))</span>
+<span class="w">    </span><span class="p">.</span><span class="na">aggregate</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">MetricsAggregator</span><span class="p">())</span>
+<span class="w">    </span><span class="p">.</span><span class="na">addSink</span><span class="p">(</span><span class="k">new</span><span class="w"> </span><span class="n">RedisMetricsSink</span><span class="p">());</span>
+</code></pre></div>
 <h3 id="checkpointing-the-secret-sauce">Checkpointing: The Secret Sauce</h3>
 <p>Flink's killer feature is <strong>checkpointing</strong>. Every 10 seconds, Flink snapshots:</p>
 <ul>
@@ -315,7 +315,7 @@ orders
 <li>Any accumulated aggregations</li>
 </ul>
 <p>If a TaskManager crashes, Flink restores from the last checkpoint and replays from Kafka. Zero data loss. Exactly-once processing.</p>
-<pre><code>┌─────────────────────────────────────────────────────────┐
+<div class="highlight"><pre><span></span><code>┌─────────────────────────────────────────────────────────┐
 │                    Checkpoint T=10s                     │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
 │  │ Kafka       │  │ Window      │  │ Pending     │      │
@@ -325,7 +325,7 @@ orders
 │  │ P2: 1101    │  │ airport: 15 │  │             │      │
 │  └─────────────┘  └─────────────┘  └─────────────┘      │
 └─────────────────────────────────────────────────────────┘
-</code></pre>
+</code></pre></div>
 <h3 id="the-results_1">The Results</h3>
 <table>
 <thead>
@@ -372,7 +372,7 @@ orders
 <hr />
 <h2 id="the-crossover-points">The Crossover Points</h2>
 <p>When should you upgrade? Here's what Joe learned:</p>
-<pre><code>┌────────────────────────────────────────────────────────────┐
+<div class="highlight"><pre><span></span><code>┌────────────────────────────────────────────────────────────┐
 │                                                            │
 │  Orders/sec    Architecture Choice                         │
 │                                                            │
@@ -386,7 +386,7 @@ orders
 │         ~100/s    ~500/s                                   │
 │                                                            │
 └────────────────────────────────────────────────────────────┘
-</code></pre>
+</code></pre></div>
 <p><strong>Don't over-engineer early.</strong> V3 has significant operational complexity:</p>
 <ul>
 <li>Kafka cluster management</li>
@@ -552,7 +552,7 @@ flowchart TB
 <li><code>terraform destroy</code> tears everything down to save costs</li>
 </ol>
 <p>The infrastructure is modular - seven Terraform modules that can be deployed independently:</p>
-<pre><code>infra/
+<div class="highlight"><pre><span></span><code>infra/
 ├── modules/
 │   ├── resource-group/    # Azure resource container
 │   ├── vnet/              # Network isolation
@@ -563,7 +563,7 @@ flowchart TB
 │   └── storage/           # Load test results
 └── environments/
     └── dev/               # Cost-optimized dev config
-</code></pre>
+</code></pre></div>
 <p><strong>The catch?</strong> Cloud costs. Even with spot instances and burstable VMs, running AKS clusters adds up quickly. I have to <code>terraform destroy</code> everything when I'm not actively running tests to avoid burning through credits. If you'd like to see real p95/p99 latency numbers and proper crossover point analysis, consider buying me a coffee to help cover the Azure bill.</p>
 <p>Until then, happy brewing! ☕</p>
 <hr />

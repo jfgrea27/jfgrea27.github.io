@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kafka: a practical exploration</title>
 <link rel="icon" href="/favicon/favicon.ico">
-<link rel="stylesheet" href="/style.css?v=3">
+<link rel="stylesheet" href="/style.css?v=5">
 
 </head>
 <body>
@@ -106,33 +106,33 @@ From the producer's perspective, if a topic has several partitions spread across
 <p>In this section, we will look at delivery semantics from the perspective of the producer.</p>
 <p><em>At-leace-once</em></p>
 <p>The setup up for at-least-once semantic is as follows:</p>
-<pre><code># producer setup
+<div class="highlight"><pre><span></span><code># producer setup
 acks=all # waits all in-sync replicas (ISR) acknowledgement
 retries&gt;0 # retries if record is not sent
 enable.idempotence=false # will not deduplicate messages if received twice
-</code></pre>
+</code></pre></div>
 <p>To simulate multiple same message sent, we will use <a href="https://github.com/Shopify/toxiproxy">toxiproxy</a> to block acknowledgements:</p>
 <video src="05-producer-delivery-semantics/at-least-once-demo.mp4" controls title="At-least-once delivery demo"></video>
 
 <p>Here is a demo where we set up simple producer/consumer, then add latency via the <code>toxiproxy</code>, then remove the latency and see that a consumer will consume the same message twice.</p>
 <p><em>At-most-once</em></p>
 <p>The setup for at-most-once semantic is as follows:</p>
-<pre><code># producer setup
-acks=0 # don't acknowledge, just send next message
-retries=0 # don't retry if failed
-</code></pre>
+<div class="highlight"><pre><span></span><code># producer setup
+acks=0 # don&#39;t acknowledge, just send next message
+retries=0 # don&#39;t retry if failed
+</code></pre></div>
 <p>We will apply the same simulation as for <em>at-least-once</em> delivery semantic above but will see that no message is sent twice:</p>
 <video src="05-producer-delivery-semantics/at-most-once-demo.mp4" controls title="At-most-once delivery demo"></video>
 
 <p>Here is a demo where we set up simple producer/consumer, then add droppage via the <code>toxiproxy</code>, then remove the latency and see that a consumer will have a gap between the messages in the topic, meaning some messages were not sent.</p>
 <p><em>Exactly-once</em></p>
 <p>The setup for exactly-once semantic is as follows:</p>
-<pre><code># producer setup
-acks=0 # don't acknowledge, just send next message
-retries=0 # don't retry if failed
+<div class="highlight"><pre><span></span><code># producer setup
+acks=0 # don&#39;t acknowledge, just send next message
+retries=0 # don&#39;t retry if failed
 enable.idempotence=true # deduplicate messages if they arrive twice
 transactional.id=demo-tx-1
-</code></pre>
+</code></pre></div>
 <p>Here we see that Kafka requires a transaction to apply exactly-once delivery semantics. This transaction allows producers to send messages atomically to one/more topics (a.k.a. all or nothing).</p>
 <video src="05-producer-delivery-semantics/exactly-once-demo.mp4" controls title="Exactly-once delivery demo"></video>
 
@@ -151,19 +151,19 @@ Exactly-once will require the most overhead since a transaction, idempotency, re
 <p>We will explore 3 demos for each case:</p>
 <p><em>At-most-once</em></p>
 <p>Here is the setup for at-most-once:</p>
-<pre><code># consumer config
+<div class="highlight"><pre><span></span><code># consumer config
 enable.auto.commit=true
 auto.commit.interval.ms=5
-</code></pre>
+</code></pre></div>
 <p>We will set up a consumer that will read, commit and fail processing in a loop.</p>
 <video src="06-consumer-delivery-semantics/at-most-once-demo.mp4" controls title="Consumer at-most-once delivery demo"></video>
 
 <p>As you can see, the consumer fails on every odd message, and it doesn't retry since it has already committed its consumption of these messages prior to processing them.</p>
 <p><em>At-least-once</em></p>
 <p>Here is the setup for at-most-once:</p>
-<pre><code># consumer config
+<div class="highlight"><pre><span></span><code># consumer config
 enable.auto.commit=false
-</code></pre>
+</code></pre></div>
 <p>We will set up a consumer that will read, commit and fail processing in a loop.</p>
 <video src="06-consumer-delivery-semantics/at-least-once-demo.mp4" controls title="Consumer at-least-once delivery demo"></video>
 
