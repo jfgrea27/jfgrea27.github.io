@@ -31,11 +31,7 @@
             pkgs.just
             pkgs.git
             # site builder
-            pkgs.hugo
             pkgs.uv
-            # manim dependencies
-            pkgs.ffmpeg
-            pkgs.texlive.combined.scheme-full
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${gccLib}/lib:${pkgs.zlib}/lib
